@@ -1,0 +1,96 @@
+# HOW TO DEVELOP
+
+#
+# Prep Work (ensure need modules are up-to-date):
+#   sudo apt install python3-pip
+#   sudo apt install python3-pip-whl
+#   pip install build --break-system-packages
+#   sudo apt install twine
+#   -- antiquated way
+#      sudo pacman -Syu python-pip
+#      sudo pacman -Syu python-build
+#      sudo pacman -Syu python-twine
+#   -- antiquated way
+#      python3 -m pip install --upgrade pip
+#      python3 -m pip install --upgrade build
+#      python3 -m pip install --upgrade twine
+#
+# Optionally, `python3 -m venv venv`, and then
+#   - source env/bin/activate # to activate
+#   - deactivate # to deactivate
+# 
+# rm -rf ./dist && python3 -m build && pip install -e . --break-system-packages
+#
+#    -OR-
+# python3 -m zapdev.main
+#
+#    -OR-
+# cd src/zapdev && ./main.py
+#
+#    -OR-
+# src/zapdev/main.py
+
+# HOW TO PUBLISH...
+# PUBLIC Build and deploy (from project directory):
+#   ## BUMP the version (below in [project])
+#   rm -rf dist; python3 -m build; ls dist/.
+#   python3 -m twine upload dist/*     # keyring --disable # may be required
+#     ## Enter __token__ and the saved TOKEN (in bitwarden)
+#   pipx upgrade zapdev || pipx install zapdev # >= python3.11
+#   --OR-- sudo python3 -m pip install zapdev # <= python3.10
+#   ## VISIT  https://pypi.org/project/zapdev and delete old versions
+#
+# TEST Build and test (from project directory):
+#   ## BUMP the version (below in [project])
+#   rm -r dist; python3 -m build
+#   python3 -m twine upload --repository testpypi dist/* # keyring --disable # may be required
+#     ## Enter __token__ and the saved TOKEN (in bitwarden)
+#   sudo python3 -m pip install --upgrade --index-url https://test.pypi.org/simple/ --no-deps --break-system-packages zapdev
+#   ## VISIT  https://test.pypi.org/project/zapdev and delete old versions
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zapdev"
+version = "0.9.2"
+description = "A tool to wipe disks and partitions for Linux"
+authors = [
+    { name = "Joe Defen", email = "joedef@google.com" }
+]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+
+keywords = ["disk", "partition", "wipe", "clean", ]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux"
+]
+dependencies = [
+    'importlib-metadata; python_version<"3.8"',
+    'psutil>=5.9',
+]
+
+[project.urls]
+"Homepage" = "https://github.com/joedefen/zapdev"
+"Bug Tracker" = "https://github.com/joedefen/zapdev/issues"
+
+[project.scripts]
+zapdev = "zapdev.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+
+exclude = [
+    "__pycache__",
+]
+

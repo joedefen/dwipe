@@ -1,0 +1,9 @@
+#!/bin/bash
+script_dir=$(dirname "$0")
+set -ex
+cd ${script_dir}
+rm -rf ./dist
+python3 -m pip install build --break-system-packages
+python3 -m build
+pip install -e . --break-system-packages
+

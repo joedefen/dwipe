@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-""" TBD """
+""" TBD
+PYTHONPATH=src python3 zapdev.main
+PYTHONPATH=src python src/zapdev/main.py
+
+
+
+
+"""
 # pylint: disable=too-many-branches,too-many-statements,import-outside-toplevel
 # pylint: disable=too-many-instance-attributes,invalid-name
 # pylint: disable=broad-exception-caught,consider-using-with
+# pylint: disable=too-many-return-statements
 
 import os
 import fnmatch
@@ -12,10 +20,11 @@ import subprocess
 import time
 import threading
 import random
+import shutil
+import curses as cs
 from types import SimpleNamespace
 from typing import Tuple, List
-
-DebugLevel = 0
+from zapdev.PowerWindow import Window, OptionSpinner
 
 def human(number):
     """ Return a concise number description."""
@@ -38,7 +47,8 @@ class ZapJob:
 
     # Shared status string
 
-    def __init__(self, device_path, total_size):
+    def __init__(self, device_path, total_size, opts=None):
+        self.opts = opts if opts else SimpleNamespace(dry_run=False)
         self.device_path = device_path
         self.total_size = total_size
         self.do_abort = False
@@ -71,6 +81,7 @@ class ZapJob:
         self.start_mono = time.monotonic()  # Track the start time
 
         # Open the block device for writing
+        # with open(self.device_path, 'wb', encoding='utf-8') as device:
         with open(self.device_path, 'wb') as device:
             for loop in range(10000000000):
                 if self.do_abort:
@@ -80,7 +91,7 @@ class ZapJob:
                 # Use memoryview to avoid copying the data
                 chunk = memoryview(ZapJob.buffer)[offset:offset + ZapJob.WRITE_SIZE]
                 # Write the 16KB chunk directly to the block device # TODO actually write
-                if True:
+                if self.opts.dry_run:
                     bytes_written = ZapJob.WRITE_SIZE
                     if loop % 8 == 0:
                         time.sleep(0.000001)
@@ -90,36 +101,96 @@ class ZapJob:
                 # Optional: Check for errors or incomplete writes
                 if bytes_written < ZapJob.WRITE_SIZE:
                     break
-                if self.total_written >= self.total_size: # TODO: remove this?
+                if self.opts.dry_run and self.total_written >= self.total_size:
                     break
         self.done = True
 
 class ZapDev:
-    """"  """
-    def __init__(self):
-        self.DB = False
+    """" TBD """
+    singleton = None
+    def __init__(self, opts=None):
+        ZapDev.singleton = self
+        self.opts = opts if opts else SimpleNamespace( debug=0,
+                        dry_run=False, loop=2, search='', units='human')
+        self.DB = bool(self.opts.debug)
         self.mounts_lines = None
         self.partitions = {} # a dict of namespaces keyed by name
+        self.visibles = []   # visible partitions
         self.phys_majors = set() # major devices that are physical devices
         self.virtual_majors = set() # major devices that are NOT physical devices
         self.blkid_lines = None
         self.majors = {}    # devices with minor==0
-        self.random_buffer = os.urandom(1 * 1024 * 1024)
+        self.wids = None
+        self.head_str = None
+
+        self.prev_filter = '' # string
+        self.filter = None # compiled pattern
+        self.pick_is_running = False
+        self.pick_name = ''  # device name of current pick line
+        self.pick_actions = {} # key, tag
+
+        # EXPAND
+        self.win, self.spin = None, None
+
+        self.check_preqreqs()
+
+    @staticmethod
+    def check_preqreqs():
+        """ Check that needed programs are installed. """
+        ok = True
+        for prog in 'blkid'.split():
+            if shutil.which(prog) is None:
+                ok = False
+                print(f'ERROR: cannot find {prog!r} on $PATH')
+        if not ok:
+            sys.exit(1)
+
+    @staticmethod
+    def mod_pick(line):
+        """ Callback to modify the "pick line" being highlighted;
+            We use it to alter the state
+        """
+        this = ZapDev.singleton
+        this.pick_name, this.pick_actions = this.get_actions(line)
+        header = this.get_keys_line()
+        # ASSUME line ends in /....
+        parts = header.split('/', maxsplit=1)
+        wds = parts[0].split()
+        this.win.head.pad.move(0, 0)
+        for wd in wds:
+            if wd[0]in ('<', '|', '❚'):
+                this.win.add_header(wd + ' ', resume=True)
+                continue
+            if wd:
+                this.win.add_header(wd[0], attr=cs.A_BOLD|cs.A_UNDERLINE, resume=True)
+            if wd[1:]:
+                this.win.add_header(wd[1:] + ' ', resume=True)
+
+        this.win.add_header('/', attr=cs.A_BOLD+cs.A_UNDERLINE, resume=True)
+        if len(parts) > 1 and parts[1]:
+            this.win.add_header(f'{parts[1]}', resume=True)
+        _, col = this.win.head.pad.getyx()
+        pad = ' ' * (this.win.get_pad_width()-col)
+        this.win.add_header(pad, resume=True)
+        return line
 
     @staticmethod
     def _make_partition_namespace(major, minor, name):
         return SimpleNamespace(name=name,       # /proc/partitions
-                              major=major,       # /proc/partitions
-                              minor=minor,       # /proc/partitions
-                              state='-',         # run-time
-                              label='',       # blkid
-                              blk_size=None,       # blkid
-                              fstype='',      # blkid
-                              used_bytes=None,  # os.statvfs() # if mounted
-                              size_bytes=None,  # /sys/block/{name}/...
-                              mounts=[],        # /proc/mounts
-                              minors=[],
-                              )
+                            major=major,       # /proc/partitions
+                            minor=minor,       # /proc/partitions
+                            state='-',         # run-time
+                            label='',       # blkid
+                            blk_size=None,       # blkid
+                            fstype='',      # blkid
+                            used_bytes=None,  # os.statvfs() # if mounted
+                            size_bytes=None,  # /sys/block/{name}/...
+                            mounts=[],        # /proc/mounts
+                            minors=[],
+                            job=None,         # if zap running
+                            line='',          # rendering
+                            row=-1,
+                            )
 
     def _slurp_command(self, command: str) -> Tuple[List[str], List[str], int]:
         """ Executes a shell command and returns its output, error, and exit code.
@@ -133,7 +204,8 @@ class ZapDev:
 
         try:
             # Using `shlex.split()` for safety and to avoid shell=True if possible
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=False)
+            process = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True, shell=False)
             output, err = process.communicate()
 
             output_lines = output.splitlines(keepends=False)
@@ -160,11 +232,13 @@ class ZapDev:
 
         try:
             # Read block size in bytes
-            with open(os.path.join(device_path, 'queue/hw_sector_size'), 'r') as f:
+            with open(os.path.join(device_path,
+                    'queue/hw_sector_size'), 'r', encoding='utf-8') as f:
                 block_size = int(f.read().strip())
 
             # Read total number of sectors (blocks)
-            with open(os.path.join(device_path, 'size'), 'r') as f:
+            with open(os.path.join(device_path, 'size'),
+                                  'r', encoding='utf-8') as f:
                 num_blocks = int(f.read().strip())
 
             # Calculate total size in bytes
@@ -235,7 +309,7 @@ class ZapDev:
                 if os.path.isdir(partition_path) and entry.startswith(device):
                     size_path = os.path.join(partition_path, 'size')
                     try:
-                        with open(size_path, 'r') as size_file:
+                        with open(size_path, 'r', encoding='utf-8') as size_file:
                             sectors = int(size_file.read().strip())
                             # Size in bytes: sectors * 512
                             size_bytes = sectors * 512
@@ -391,15 +465,194 @@ class ZapDev:
                     ns.state = minor.state
                     break
 
+        wids = self.wids = SimpleNamespace(name=4, state=4, label=5, fstype=4, human=6)
         for ns in self.partitions.values():
-            # print(vars(ns))
-            emit = f'{ns.name:>20}'
-            emit += f' {ns.state:>5}'
-            emit += f' {ns.label:>15}'
-            emit += f' {ns.fstype:>10}'
-            emit += f' {human(ns.size_bytes):>6}'
-            emit += f' {",".join(ns.mounts)}'
-            print(emit)
+            wids.name = max(wids.name, len(ns.name))
+            wids.label = max(wids.label, len(ns.label))
+            wids.fstype = max(wids.fstype, len(ns.fstype))
+        self.head_str = self.get_head_str()
+        for ns in self.partitions.values():
+            print(self.part_str(ns))
+
+    def get_head_str(self):
+        """ TBD """
+        wids = self.wids
+        emit = f'{"STAT":-^{wids.state}}'
+        emit += f' {"NAME":-^{wids.name}}'
+        emit += f' {"SIZE":-^{wids.human}}'
+        emit += f' {"TYPE":-^{wids.fstype}}'
+        emit += f' {"LABEL":-^{wids.label}}'
+        emit += ' MOUNTS'
+        return emit
+
+    def part_str(self, partition):
+        """ Convert partition to human value. """
+        ns = partition # shorthand
+        wids = self.wids
+        emit = f'{ns.state:>{wids.state}}'
+        emit += f' {ns.name:>{wids.name}}'
+        emit += f' {human(ns.size_bytes):>{wids.human}}'
+        emit += f' {ns.fstype:>{wids.fstype}}'
+        emit += f' {ns.label:>{wids.label}}'
+        emit += f' {",".join(ns.mounts)}'
+        return emit
+
+    def do_key(self, key):
+        """ TBD """
+        if not key:
+            return True
+        if key == cs.KEY_ENTER or key == 10: # Handle ENTER
+            if self.opts.help_mode:
+                self.opts.help_mode = False
+                return True
+#           if self.pick_is_installed:
+#               key = ord('r') # remove installed app
+#           else:
+#               key = ord('i') # install uninstalled app
+
+        if key in self.spin.keys:
+            value = self.spin.do_key(key, self.win)
+            return value
+
+        if key == 27: # ESCAPE
+            self.prev_filter = ''
+            self.filter = None
+            self.win.pick_pos = 0
+            return None
+
+        if key in (ord('q'), ord('x')):
+            self.win.stop_curses()
+            os.system('clear; stty sane')
+            sys.exit(0)
+
+        if key == ord('s') and not self.pick_is_running:
+            return None  # TODO: start zap job
+
+        if key == ord('k') and self.pick_is_running:
+            return None  # TODO: stop job
+
+        if key == ord('K'):
+            return None # TODO: kill running jobs
+
+        if key == ord('/'):
+            # pylint: disable=protected-access
+            start_filter = self.prev_filter
+
+            prefix = ''
+            while True:
+                pattern = self.win.answer(f'{prefix}Enter filter regex:', seed=self.prev_filter)
+                self.prev_filter = pattern
+
+                pattern.strip()
+                if not pattern:
+                    self.filter = None
+                    break
+
+                try:
+                    if re.match(r'^[\-\w\s]*$', pattern):
+                        words = pattern.split()
+                        self.filter = re.compile(r'\b' + r'(|.*\b)'.join(words), re.IGNORECASE)
+                        break
+                    self.filter = re.compile(pattern, re.IGNORECASE)
+                    break
+                except Exception:
+                    prefix = 'Bad regex: '
+
+            if start_filter != self.prev_filter:
+                # when filter changes, move to top
+                self.win.pick_pos = 0
+
+            return None
+        return None
+    
+    def get_keys_line(self):
+        """ TBD """
+        # EXPAND
+        line = ''
+        for key, verb in self.pick_actions.items():
+            if key[0] == verb[0]:
+                line += f' {verb}'
+            else:
+                line += f' {key}:{verb}'
+        # or EXPAND
+        line += f' ❚ quit ?:help /{self.prev_filter}  '
+        # for action in self.actions:
+            # line += f' {action[0]}:{action}'
+        return line[1:]
+    
+    def get_actions(self, part):
+        """ Determine the type of the current line and available commands."""
+        name, actions = '', {}
+        lines = self.win.body.texts
+        if 0 <= self.win.pick_pos < len(lines):
+            # line = lines[self.win.pick_pos]
+            part = self.visibles[self.win.pick_pos]
+            self.pick_is_running = bool(part.job)
+            # EXPAND
+            if self.pick_is_running:
+                actions['k'] = 'kill'
+            elif part.state == '-':
+                actions['s'] = 'start'
+        return name, actions
+
+    def main_loop(self):
+        """ TBD """
+
+        spin = self.spin = OptionSpinner()
+        spin.default_obj = self.opts
+        spin.add_key('help_mode', '? - toggle help screen', vals=[False, True])
+        other = 'sk/Kqx'  # TODO: fix me
+        other_keys = set(ord(x) for x in other)
+        other_keys.add(cs.KEY_ENTER)
+        other_keys.add(27) # ESCAPE
+        other_keys.add(10) # another form of ENTER
+
+        self.win = Window(head_line=True, body_rows=200, head_rows=4,
+                          keys=spin.keys ^ other_keys, mod_pick=self.mod_pick)
+        self.opts.name = "[hit 'n' to enter name]"
+        while True:
+            if self.opts.help_mode:
+                self.win.set_pick_mode(False)
+                self.spin.show_help_nav_keys(self.win)
+                self.spin.show_help_body(self.win)
+                # EXPAND
+                lines = [
+                    'GENERALLY AVAILABLE:',
+                    '   K - kill ALL zaps in progress (if any)',
+                    '   q or x - quit program (CTL-C disabled)',
+                    '   / - filter devices by (anchored) regex',
+                    '   ESC = clear filter and jump to top',
+                    '   ENTER = stat, kill, or return from help',
+                    'CONTEXT SENSITIVE:',
+                    '   s - start zap of device',
+                    '   k - kill zap of device',
+
+                ]
+                for line in lines:
+                    self.win.put_body(line)
+            else:
+                def wanted(name):
+                    return not self.filter or self.filter.search(name)
+                # self.win.set_pick_mode(self.opts.pick_mode, self.opts.pick_size)
+                self.win.set_pick_mode(True)
+                self.win.add_header(self.get_keys_line(), attr=cs.A_BOLD)
+
+                self.win.add_header(self.head_str)
+                _, col = self.win.head.pad.getyx()
+                pad = ' ' * (self.win.get_pad_width()-col)
+                self.win.add_header(pad, resume=True)
+
+                self.visibles = []
+                for name, partition in self.partitions.items():
+                    partition.line = None
+                    if wanted(name) or partition.job:
+                        partition.line = self.part_str(partition)
+                        self.win.add_body(partition.line)
+                        self.visibles.append(partition)
+            self.win.render()
+
+            _ = self.do_key(self.win.prompt(seconds=300))
+            self.win.clear()
 
 
 def rerun_module_as_root(module_name):
@@ -412,59 +665,39 @@ def rerun_module_as_root(module_name):
 
 def main():
     """Main loop"""
-    global DebugLevel
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument('-n', '--dry-run', action='store_true',
+            help='just pretend to zap devices')
     parser.add_argument('-D', '--debug', action='count', default=0,
             help='debug mode (the more Ds, the higher the debug level)')
-    parser.add_argument('-C', '--no-cpu', action='store_false', dest='cpu',
-            help='do NOT report percent CPU (only in window mode)')
-    parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid'),
-            default='exe', help='grouping method for presenting rows')
-    parser.add_argument('-f', '--fit-to-window', action='store_true',
-            help='do not overflow window [if -w]')
-    parser.add_argument('-k', '--min-delta-kb', type=int, default=None,
-            help='minimum delta KB to show again [dflt=100 if DB else 1000')
     parser.add_argument('-l', '--loop', type=int, default=0, dest='loop_secs',
-            help='loop interval in secs [dflt=5 if -w else 0]')
-    parser.add_argument('-L', '--cmdlen', type=int, default=36,
-            help='max shown command length [dflt=36 if not -w]')
-    parser.add_argument('-t', '--top-pct', type=int, default=100,
-            help='report group contributing to top pct of ptotal [dflt=100]')
-    parser.add_argument('-n', '--numbers', action='store_true',
-            help='show line numbers in report')
-    parser.add_argument('-U', '--run-as-user', action='store_true',
-            help='run as user (NOT as root)')
-    parser.add_argument('-o', '--others', action='store_false',
-            help='expand "other" into shSYSV, shOth, stack, text')
-    parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
-            default='MB', help='units of memory [dflt=MB]')
-    parser.add_argument('-R', '--no-rise', action='store_false', dest='rise_to_top',
-            help='do NOT raise change/adds to top (only in window mode)')
-    parser.add_argument('-s', '--sortby', choices=('mem', 'cpu', 'name'),
-            default='mem', help='grouping method for presenting rows')
+            help='loop interval in secs [dflt=0 if -w else 0]')
     parser.add_argument('-/', '--search', default='',
             help='show items with search string in name')
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
             help='show in "curses" window [disables: -D,-t,-L]')
-    parser.add_argument('pids', nargs='*', action='store',
-            help='list of pids/groups (none means every accessible pid)')
     opts = parser.parse_args()
     # DB(0, f'opts={opts}')
 
-    if not opts.run_as_user and os.geteuid() != 0:
+    if os.geteuid() != 0:
         # Re-run the script with sudo needed and opted
         rerun_module_as_root('zapdev.main')
 
-    zapdev = ZapDev()
+    zapdev = ZapDev(opts=opts)
     zapdev.init_partitions()
     
+    zapdev.main_loop()
 
-    job = ZapJob.start_job('/dev/sdb3', 100 * 1024 * 1024 * 1024)
-    while not job.done:
-        print(job.get_status_str())
-        time.sleep(2)
-    job.thread.join()
+
+#   if False:
+#       job = ZapJob.start_job('/dev/sdb3', 100 * 1024 * 1024 * 1024)
+#       while not job.done:
+#           print(job.get_status_str())
+#           time.sleep(2)
+#       job.thread.join()
+#   else:
+#       time.sleep(2)
 
 #   devices = get_device_info()
 #   display_device_list(devices)
