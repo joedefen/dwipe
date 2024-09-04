@@ -75,6 +75,7 @@ class ZapJob:
 
         self.start_mono = time.monotonic()  # Track the start time
         self.total_written = 0
+        self.wr_hists = []  # list of (mono, written)
         self.done = False
 
     @staticmethod
@@ -82,6 +83,7 @@ class ZapJob:
         """ TBD """
         job = ZapJob(device_path=device_path, total_size=total_size, opts=opts)
         job.thread = threading.Thread(target=job.write_random_chunk)
+        job.wr_hists.append(SimpleNamespace(mono=time.monotonic(), written=0))
         job.thread.start()
         return job
 
@@ -96,19 +98,29 @@ class ZapJob:
     def get_status(self):
         """ TBD """
         pct_str, rate_str, when_str = '', '', ''
-        elapsed_time = time.monotonic() - self.start_mono
-        rate = self.total_written / elapsed_time if elapsed_time > 0 else 0
-        rate_str = f'{human(int(round(rate, 0)))}/s'
+        mono = time.monotonic()
+        written = self.total_written
+        elapsed_time = mono - self.start_mono
 
         pct = (self.total_written / self.total_size) * 100
-        pct_str = f'{int(round(pct, 0))}%'
+        pct_str = f'{int(round(pct))}%'
         if self.do_abort:
             pct_str = 'STOP'
-        
+
+        self.wr_hists.append(SimpleNamespace(mono=mono, written=written))
+        floor = mono - 30  # 30w moving average
+        while len(self.wr_hists) >= 3 and self.wr_hists[1].mono >= floor:
+            del self.wr_hists[0]
+        delta_mono = mono - self.wr_hists[0].mono
+        rate = (written - self.wr_hists[0].written) / delta_mono if delta_mono > 1.0 else 0
+        rate_str = f'{human(int(round(rate, 0)))}/s'
+
         if rate > 0:
-            when = int(round((self.total_size - self.total_written)/rate, 0))
+            when = int(round((self.total_size - self.total_written)/rate))
             when_str = ago_str(when)
-        return pct_str, rate_str, when_str
+
+
+        return ago_str(int(round(elapsed_time))), pct_str, rate_str, when_str
 
     def write_random_chunk(self):
         """Writes random chunks to a device and updates the progress status."""
@@ -154,6 +166,7 @@ class ZapDev:
         self.wids = None
         self.head_str = None
         self.job_cnt = 0
+        self.exit_when_no_jobs = False
 
         self.prev_filter = '' # string
         self.filter = None # compiled pattern
@@ -532,16 +545,34 @@ class ZapDev:
 
     def do_key(self, key):
         """ TBD """
+        def stop_if_idle(part):
+            if part.state[-1] == '%':
+                if part.job and not part.job.done:
+                    part.job.do_abort = True
+            return 1 if part.job else 0
+
+        def stop_all():
+            rv = 0
+            for part in self.partitions.values():
+                rv += stop_if_idle(part)
+            return rv # number jobs running
+        
+        def exit_if_no_jobs():
+            if stop_all() == 0:
+                self.win.stop_curses()
+                os.system('clear; stty sane')
+                sys.exit(0)
+            return True  # continue running
+        
+        if self.exit_when_no_jobs:
+            return exit_if_no_jobs()
+
         if not key:
             return True
         if key == cs.KEY_ENTER or key == 10: # Handle ENTER
             if self.opts.help_mode:
                 self.opts.help_mode = False
-                return True
-#           if self.pick_is_installed:
-#               key = ord('r') # remove installed app
-#           else:
-#               key = ord('i') # install uninstalled app
+                return None
 
         if key in self.spin.keys:
             value = self.spin.do_key(key, self.win)
@@ -554,9 +585,10 @@ class ZapDev:
             return None
 
         if key in (ord('q'), ord('x')):
-            self.win.stop_curses()
-            os.system('clear; stty sane')
-            sys.exit(0)
+            self.exit_when_no_jobs = True
+            self.filter = re.compile('STOPPING', re.IGNORECASE)
+            self.prev_filter = 'STOPPING'
+            return exit_if_no_jobs()
 
         if key == ord('w') and not self.pick_is_running:
             part = self.partitions[self.pick_name]
@@ -572,13 +604,13 @@ class ZapDev:
 
         if key == ord('s') and self.pick_is_running:
             part = self.partitions[self.pick_name]
-            if part.state[-1] == '%':
-                if part.job and not part.job.done:
-                    part.job.do_abort = True
+            stop_if_idle(part)
             return None
 
         if key == ord('S'):
-            return None # TODO: kill running jobs
+            for part in self.partitions.values():
+                stop_if_idle(part)
+            return None
 
         if key == ord('/'):
             # pylint: disable=protected-access
@@ -595,10 +627,6 @@ class ZapDev:
                     break
 
                 try:
-                    if re.match(r'^[\-\w\s]*$', pattern):
-                        words = pattern.split()
-                        self.filter = re.compile(r'\b' + r'(|.*\b)'.join(words), re.IGNORECASE)
-                        break
                     self.filter = re.compile(pattern, re.IGNORECASE)
                     break
                 except Exception:
@@ -621,7 +649,9 @@ class ZapDev:
             else:
                 line += f' {key}:{verb}'
         # or EXPAND
-        line += f' ❚ quit ?:help /{self.prev_filter}  '
+        line += ' ❚'
+        line += ' Stop' if self.job_cnt > 0 else ''
+        line += f' quit ?:help /{self.prev_filter}  '
         # for action in self.actions:
             # line += f' {action[0]}:{action}'
         return line[1:]
@@ -694,9 +724,9 @@ class ZapDev:
                             partition.mounts = []
                             self.job_cnt -= 1
                     if partition.job:
-                        pct, rate, until = partition.job.get_status()
+                        elapsed, pct, rate, until = partition.job.get_status()
                         partition.state = pct
-                        partition.mounts = [f'{rate} ETA:{until}']
+                        partition.mounts = [f'{elapsed} {rate} REM:{until}']
 
                     if wanted(name) or partition.job:
                         partition.line = self.part_str(partition)
