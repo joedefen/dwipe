@@ -21,7 +21,7 @@ import traceback
 import curses as cs
 from types import SimpleNamespace
 from typing import Tuple, List
-from zapdev.PowerWindow import Window, OptionSpinner
+from dwipe.PowerWindow import Window, OptionSpinner
 
 def human(number):
     """ Return a concise number description."""
@@ -62,6 +62,7 @@ class ZapJob:
     BUFFER_SIZE = 1 * 1024 * 1024  # 1MB
     WRITE_SIZE = 16 * 1024  # 16KB
     buffer = bytearray(os.urandom(BUFFER_SIZE))
+    zero_buffer = bytes(WRITE_SIZE)
 
     # Shared status string
 
@@ -125,6 +126,7 @@ class ZapJob:
     def write_random_chunk(self):
         """Writes random chunks to a device and updates the progress status."""
         self.total_written = 0  # Track total bytes written
+        first_write = True
 
         with open(self.device_path, 'wb') as device:
             # for loop in range(10000000000):
@@ -140,19 +142,27 @@ class ZapJob:
                     time.sleep(0.25)
                 else:
                     bytes_written = device.write(chunk)
+                if first_write:
+                    first_write = 0
                 self.total_written += bytes_written
                 # Optional: Check for errors or incomplete writes
                 if bytes_written < ZapJob.WRITE_SIZE:
                     break
                 if self.opts.dry_run and self.total_written >= self.total_size:
                     break
+            # clear the beginning of device whether aborted or not
+            # if we have started writing
+            if self.total_written > 0:
+                device.seek(0)
+                chunk = memoryview(ZapJob.zero_buffer)
+                bytes_written = device.write(chunk)
         self.done = True
 
-class ZapDev:
+class DiskWipe:
     """" TBD """
     singleton = None
     def __init__(self, opts=None):
-        ZapDev.singleton = self
+        DiskWipe.singleton = self
         self.opts = opts if opts else SimpleNamespace( debug=0,
                         dry_run=False, loop=2, search='', units='human')
         self.DB = bool(self.opts.debug)
@@ -195,7 +205,7 @@ class ZapDev:
         """ Callback to modify the "pick line" being highlighted;
             We use it to alter the state
         """
-        this = ZapDev.singleton
+        this = DiskWipe.singleton
         this.pick_name, this.pick_actions = this.get_actions(line)
         header = this.get_keys_line()
         # ASSUME line ends in /....
@@ -412,7 +422,7 @@ class ZapDev:
     def is_zappable(device_name):
         """Check if a device is a writable block device using whitelist and attributes."""
         # Check whitelist first
-        state = ZapDev.name_check(device_name)
+        state = DiskWipe.name_check(device_name)
         if state == 'whtLst':
             # print(f"{device_name} whitelisted")
             return True
@@ -421,7 +431,7 @@ class ZapDev:
             return False
 
         # Check writable status
-        if ZapDev.unwritable(device_name):
+        if DiskWipe.unwritable(device_name):
             print(f"{device_name} is not writable")
         return True  # Unsure is OK
 
@@ -770,20 +780,20 @@ def main():
     opts = parser.parse_args()
     # opts.dry_run = True         # TODO: remove (for development)
     # DB(0, f'opts={opts}')
-    zapdev = None
+    dwipe = None
 
     try:
         if os.geteuid() != 0:
             # Re-run the script with sudo needed and opted
-            rerun_module_as_root('zapdev.main')
+            rerun_module_as_root('dwipe.main')
 
-        zapdev = ZapDev(opts=opts)
-        zapdev.init_partitions()
+        dwipe = DiskWipe(opts=opts)
+        dwipe.init_partitions()
         
-        zapdev.main_loop()
+        dwipe.main_loop()
     except Exception as exce:
-        if zapdev and zapdev.win:
-            zapdev.win.stop_curses()
+        if dwipe and dwipe.win:
+            dwipe.win.stop_curses()
         print("exception:", str(exce))
         print(traceback.format_exc())
         sys.exit(15)

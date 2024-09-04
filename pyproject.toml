@@ -22,13 +22,13 @@
 # rm -rf ./dist && python3 -m build && pip install -e . --break-system-packages
 #
 #    -OR-
-# python3 -m zapdev.main
+# python3 -m dwipe.main
 #
 #    -OR-
-# cd src/zapdev && ./main.py
+# cd src/dwipe && ./main.py
 #
 #    -OR-
-# src/zapdev/main.py
+# src/dwipe/main.py
 
 # HOW TO PUBLISH...
 # PUBLIC Build and deploy (from project directory):
@@ -36,24 +36,24 @@
 #   rm -rf dist; python3 -m build; ls dist/.
 #   python3 -m twine upload dist/*     # keyring --disable # may be required
 #     ## Enter __token__ and the saved TOKEN (in bitwarden)
-#   pipx upgrade zapdev || pipx install zapdev # >= python3.11
-#   --OR-- sudo python3 -m pip install zapdev # <= python3.10
-#   ## VISIT  https://pypi.org/project/zapdev and delete old versions
+#   pipx upgrade dwipe || pipx install dwipe # >= python3.11
+#   --OR-- sudo python3 -m pip install dwipe # <= python3.10
+#   ## VISIT  https://pypi.org/project/dwipe and delete old versions
 #
 # TEST Build and test (from project directory):
 #   ## BUMP the version (below in [project])
 #   rm -r dist; python3 -m build
 #   python3 -m twine upload --repository testpypi dist/* # keyring --disable # may be required
 #     ## Enter __token__ and the saved TOKEN (in bitwarden)
-#   sudo python3 -m pip install --upgrade --index-url https://test.pypi.org/simple/ --no-deps --break-system-packages zapdev
-#   ## VISIT  https://test.pypi.org/project/zapdev and delete old versions
+#   sudo python3 -m pip install --upgrade --index-url https://test.pypi.org/simple/ --no-deps --break-system-packages dwipe
+#   ## VISIT  https://test.pypi.org/project/dwipe and delete old versions
 
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "zapdev"
+name = "dwipe"
 version = "0.9.2"
 description = "A tool to wipe disks and partitions for Linux"
 authors = [
@@ -76,11 +76,11 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/joedefen/zapdev"
-"Bug Tracker" = "https://github.com/joedefen/zapdev/issues"
+"Homepage" = "https://github.com/joedefen/dwipe"
+"Bug Tracker" = "https://github.com/joedefen/dwipe/issues"
 
 [project.scripts]
-zapdev = "zapdev.main:main"
+dwipe = "dwipe.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
