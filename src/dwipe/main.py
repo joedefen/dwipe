@@ -71,7 +71,6 @@ class ZapJob:
         self.device_path = device_path
         self.total_size = total_size
         self.do_abort = False
-        self.status_lock = threading.Lock()  # TODO: remove
         self.thread = None
 
         self.start_mono = time.monotonic()  # Track the start time
@@ -158,6 +157,274 @@ class ZapJob:
                 bytes_written = device.write(chunk)
         self.done = True
 
+class DeviceInfo:
+    """ Class to dig out the info we want from the system."""
+    disk_majors = set() # major devices that are disks
+
+    def __init__(self, opts):
+        self.opts = opts
+        self.DB = opts.debug
+        self.wids = None
+        self.head_str = None
+
+    @staticmethod
+    def _make_partition_namespace(major, minor, name, size_bytes):
+        return SimpleNamespace(name=name,       # /proc/partitions
+                            major=major,       # /proc/partitions
+                            minor=minor,       # /proc/partitions
+                            parent=None,     # a partition
+                            state='-',         # run-time
+                            label='',       # blkid
+                            fstype='',      # blkid
+                            size_bytes=size_bytes,  # /sys/block/{name}/...
+                            mounts=[],        # /proc/mounts
+                            minors=[],
+                            job=None,         # if zap running
+                            )
+
+    @staticmethod
+    def _slurp_file(pathname):
+        with open(pathname, "r", encoding='utf-8') as fh:
+            return [line.strip() for line in fh]
+
+    def _slurp_command(self, command: str) -> Tuple[List[str], List[str], int]:
+        """ Executes a shell command and returns its output, error, and exit code.
+        Args: command (str): The shell command to execute.
+              debug (bool): Whether to print the debug information.
+        Returns: Tuple[List[str], List[str], int]: A tuple containing the command output lines,
+                 error lines, and the exit status code.
+        """
+        if self.DB:
+            print(f'DB + {command}')
+
+        try:
+            # Using `shlex.split()` for safety and to avoid shell=True if possible
+            process = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True, shell=False)
+            output, err = process.communicate()
+
+            output_lines = output.splitlines(keepends=False)
+            error_lines = err.splitlines(keepends=False)
+
+            return output_lines, error_lines, process.returncode
+
+        except subprocess.CalledProcessError as exc:
+            print(f"ERR: {repr(command)} failed with return code {exc.returncode}")
+            return [], [str(exc)], exc.returncode
+        except Exception as exc:
+            print(f"ERR: {repr(command)}: {exc}")
+            return [], [str(exc)], -1
+
+    def get_block_devs(self):
+
+        """ Discover all the block Devices """
+        lines, _, _ = self._slurp_command('blkid')
+
+        devs = {}
+        for line in lines:
+            # /dev/nvme0n1p2: LABEL="btrfs-common"
+            #   UUID="8f60fc2f-872d-4327-aff9-34c4c4cefde7"
+            #   UUID_SUB="d7b0987a-1133-4844-a19b-c6c22350379a"
+            #   BLOCK_SIZE="4096" TYPE="btrfs"
+            #   PARTUUID="02b5122d-5229-c347-a351-142008b89149"
+
+            matches = re.findall(r'(\w+)="([^"]+)"', line)
+            ns = SimpleNamespace() # Create a dictionary to store the fields and values
+            for match in matches:
+                field, value = match[0].lower(), match[1]
+                if field in ('type', 'block_size', 'label'):
+                    setattr(ns, field, value)
+            if not hasattr(ns, 'type'):
+                continue
+            if not hasattr(ns, 'label'):
+                ns.label = ''
+            ns.dev = os.path.basename(line.split(': ', maxsplit=1)[0])
+            devs[ns.dev] = ns
+        if self.DB:
+            print('DB: --->>> after reading blkid:')
+            for dev, ns in devs.items():
+                print(f'DB: {dev}: {vars(ns)}')
+        return devs
+
+    def determine_mount_points(self):
+        """ Absorb /proc/mounts """
+        lines = self._slurp_file('/proc/mounts')
+        rv = {}
+        for line in lines:
+            mat = re.match(r'/dev/([^/]*)\s', line)
+            if not mat:
+                continue
+            name = mat.group(1)
+
+            wds = re.split(r'\s+', line)
+            if len(wds) < 4:
+                continue
+            mount, fstype = wds[1], wds[2]
+            if name not in rv:
+                rv[name] = SimpleNamespace(fstype=fstype, mounts=[])
+            rv[name].mounts.append(mount)
+        if self.DB:
+            print('DB: --->>> after reading /proc/mounts:')
+            for name, mounts in rv.items():
+                print(f'DB: {name}: {vars(mounts)}')
+        return rv
+
+    def get_sys_partitions(self):
+        """  Absorb /proc/partitions """
+        lines = self._slurp_file('/proc/partitions')
+        parts = {}
+        for line in lines:
+            if not re.match(r'\b\d+\s+\d+\b', line):
+                continue
+            wds = line.split(maxsplit=3)
+            if len(wds) < 4:
+                continue
+            major, minor, blocks, name = line.split(maxsplit=3)
+            major, minor = int(major), int(minor)
+            parts[name] = SimpleNamespace(name=name, major=major, minor=minor,
+                                   size_bytes=int(blocks)*1024)
+        if self.DB:
+            print('DB: --->>> after reading /sys/block/*/size:')
+            for name, part in parts.items():
+                print(f'DB: {name}: {vars(part)}')
+        return parts
+
+
+    def make_linkages(self, nss):
+        """ TBD """
+        disks = {}
+        all_names = list(nss.keys())
+        for name, part in nss.items():
+            for parent_name in all_names:
+                if name[:-1].startswith(parent_name):
+                    parent = part.parent = nss[parent_name]
+                    parent.minors.append(part)
+                    disks[parent_name] = parent
+                    if not parent.fstype:
+                        parent.fstype = 'DISK'
+                    if part.mounts:
+                        parent.state = 'Mnt'
+                    self.disk_majors.add(part.major)
+                    break
+
+        return disks
+
+    def filter_partitions(self, nss):
+        """ Determine which partitions we want some are bogus like zram """
+
+        def whitelisted(device_name):
+            """Check if device_name matches any pattern in whitelist
+            which are the disk devices."""
+            WHITELIST = ['nvme*', 'sd*', 'hd*', 'mmcblk*']
+            for pattern in WHITELIST:
+                if fnmatch.fnmatch(device_name, pattern):
+                    return True
+            return False
+
+        def blacklisted(device_name):
+            """Check if device_name matches any pattern in black list
+              which are know not to be physical disks."""
+            BLACKLIST = ['zram*', 'ram*', 'dm-*', 'loop*', 'sr*']
+            for pattern in BLACKLIST:
+                if fnmatch.fnmatch(device_name, pattern):
+                    return 'blkLst'
+            return ''
+
+        def writable(device_name):
+            """Check if the device is writable."""
+            device_path = f'/dev/{device_name}'
+            try: # Check if the device file exists and is writable
+                return os.access(device_path, os.W_OK)
+            except FileNotFoundError:
+                return False
+
+        ok_nss = {}
+        for name, ns in nss.items():
+            if ns.major in self.disk_majors or whitelisted(name):
+                ok_nss[name] = ns
+                continue
+            if blacklisted(name):
+                continue
+            if writable(name):
+                if self.DB:
+                    print(r'DB:include {repr(name)} [not white/black but writable]')
+                ok_nss[name] = ns
+                continue
+            if self.DB:
+                print(r'DB:exclude {repr(name)} [not white/black but unwritable]')
+        return ok_nss
+
+    def compute_field_widths(self, nss):
+        """ TBD """
+
+        wids = self.wids = SimpleNamespace(name=4, state=4, label=5, fstype=4, human=6)
+        for ns in nss.values():
+            wids.name = max(wids.name, len(ns.name))
+            wids.label = max(wids.label, len(ns.label))
+            wids.fstype = max(wids.fstype, len(ns.fstype))
+        self.head_str = self.get_head_str()
+        for ns in nss.values():
+            print(self.part_str(ns))
+
+    def get_head_str(self):
+        """ TBD """
+        wids = self.wids
+        emit = f'{"STAT":-^{wids.state}}'
+        emit += f' {"NAME":-^{wids.name}}'
+        emit += f' {"SIZE":-^{wids.human}}'
+        emit += f' {"TYPE":-^{wids.fstype}}'
+        emit += f' {"LABEL":-^{wids.label}}'
+        emit += ' MOUNTS'
+        return emit
+
+    def part_str(self, partition):
+        """ Convert partition to human value. """
+        ns = partition # shorthand
+        wids = self.wids
+        emit = f'{ns.state:>{wids.state}}'
+        emit += f' {ns.name:<{wids.name}}'
+        emit += f' {human(ns.size_bytes):>{wids.human}}'
+        emit += f' {ns.fstype:>{wids.fstype}}'
+        emit += f' {ns.label:>{wids.label}}'
+        emit += f' {",".join(ns.mounts)}'
+        return emit
+
+
+    def assemble_partitions(self):
+        """ TBD """
+        devs = self.get_block_devs()
+        mounts = self.determine_mount_points()
+        sys_partitions = self.get_sys_partitions()
+        # sizes = self.get_partition_sizes()
+        # print(f'{sizes=}')
+        # print(f'{mounts=}')
+
+        nss = {}
+        for name, part in sys_partitions.items():
+            nss[name] = ns = self._make_partition_namespace(
+                    major=part.major, minor=part.minor, name=part.name,
+                    size_bytes=part.size_bytes)
+            dev = devs.get(name, None)
+            if dev:
+                ns.label = dev.label
+                ns.fstype = dev.type
+            mount = mounts.get(name, None)
+            if mount:
+                ns.mounts = mount.mounts
+                if ns.mounts:
+                    ns.state = 'Mnt'
+
+        self.make_linkages(nss) # find parent child relationships
+
+        nss = self.filter_partitions(nss)
+        self.compute_field_widths(nss)
+
+        if self.DB:
+            print('DB: --->>> after assemble_partitions():')
+            for name, ns in nss.items():
+                print(f'DB: {name}: {vars(ns)}')
+        return nss
+
 class DiskWipe:
     """" TBD """
     singleton = None
@@ -169,12 +436,11 @@ class DiskWipe:
         self.mounts_lines = None
         self.partitions = {} # a dict of namespaces keyed by name
         self.visibles = []   # visible partitions
-        self.phys_majors = set() # major devices that are physical devices
-        self.virtual_majors = set() # major devices that are NOT physical devices
-        self.blkid_lines = None
-        self.disks = {}    # devices that don't have another device as prefix
+        #self.phys_majors = set() # major devices that are physical devices
+        # self.virtual_majors = set() # major devices that are NOT physical devices
+        # self.blkid_lines = None
+        # self.disks = {}    # devices that don't have another device as prefix
         self.wids = None
-        self.head_str = None
         self.job_cnt = 0
         self.exit_when_no_jobs = False
 
@@ -183,6 +449,7 @@ class DiskWipe:
         self.pick_is_running = False
         self.pick_name = ''  # device name of current pick line
         self.pick_actions = {} # key, tag
+        self.dev_info = None
 
         # EXPAND
         self.win, self.spin = None, None
@@ -228,331 +495,6 @@ class DiskWipe:
         pad = ' ' * (this.win.get_pad_width()-col)
         this.win.add_header(pad, resume=True)
         return line
-
-    @staticmethod
-    def _make_partition_namespace(major, minor, name):
-        return SimpleNamespace(name=name,       # /proc/partitions
-                            major=major,       # /proc/partitions
-                            minor=minor,       # /proc/partitions
-                            parent=None,     # a partition
-                            state='-',         # run-time
-                            label='',       # blkid
-                            blk_size=None,       # blkid
-                            fstype='',      # blkid
-                            used_bytes=None,  # os.statvfs() # if mounted
-                            size_bytes=None,  # /sys/block/{name}/...
-                            mounts=[],        # /proc/mounts
-                            minors=[],
-                            job=None,         # if zap running
-                            line='',          # rendering
-                            row=-1,
-                            )
-
-    def _slurp_command(self, command: str) -> Tuple[List[str], List[str], int]:
-        """ Executes a shell command and returns its output, error, and exit code.
-        Args: command (str): The shell command to execute.
-              debug (bool): Whether to print the debug information.
-        Returns: Tuple[List[str], List[str], int]: A tuple containing the command output lines,
-                 error lines, and the exit status code.
-        """
-        if self.DB:
-            print(f'DB + {command}')
-
-        try:
-            # Using `shlex.split()` for safety and to avoid shell=True if possible
-            process = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, text=True, shell=False)
-            output, err = process.communicate()
-
-            output_lines = output.splitlines(keepends=False)
-            error_lines = err.splitlines(keepends=False)
-
-            return output_lines, error_lines, process.returncode
-
-        except subprocess.CalledProcessError as exc:
-            print(f"ERR: {repr(command)} failed with return code {exc.returncode}")
-            return [], [str(exc)], exc.returncode
-        except Exception as exc:
-            print(f"ERR: {repr(command)}: {exc}")
-            return [], [str(exc)], -1
-
-    @staticmethod
-    def get_device_size(device_name):
-        """
-        Get block size and total size of a block device.
-
-        :param device_name: The name of the device (e.g., 'sda', 'nvme0n1').
-        :return: A SimpleNamespace containing 'block_size' and 'total_size' in bytes.
-        """
-        device_path = f'/sys/block/{device_name}'
-
-        try:
-            # Read block size in bytes
-            with open(os.path.join(device_path,
-                    'queue/hw_sector_size'), 'r', encoding='utf-8') as f:
-                block_size = int(f.read().strip())
-
-            # Read total number of sectors (blocks)
-            with open(os.path.join(device_path, 'size'),
-                                  'r', encoding='utf-8') as f:
-                num_blocks = int(f.read().strip())
-
-            # Calculate total size in bytes
-            total_size = block_size * num_blocks
-
-            return SimpleNamespace(
-                block_size=block_size,
-                total_size=total_size
-            )
-        except FileNotFoundError:
-            print(f"Device {device_name} not found or does not have necessary information.")
-            return None
-        except Exception as e:
-            print(f"Error reading device information for {device_name}: {e}")
-            return None
-
-    def _load_devs(self):
-        """ Discover all the BTRS Devices """
-
-        if not self.blkid_lines:
-            self.blkid_lines, _, _ = self._slurp_command('blkid')
-        devs = {}
-        for line in self.blkid_lines:
-            # /dev/nvme0n1p2: LABEL="btrfs-common"
-            #   UUID="8f60fc2f-872d-4327-aff9-34c4c4cefde7"
-            #   UUID_SUB="d7b0987a-1133-4844-a19b-c6c22350379a"
-            #   BLOCK_SIZE="4096" TYPE="btrfs"
-            #   PARTUUID="02b5122d-5229-c347-a351-142008b89149"
-
-            matches = re.findall(r'(\w+)="([^"]+)"', line)
-            ns = SimpleNamespace() # Create a dictionary to store the fields and values
-            for match in matches:
-                field, value = match[0].lower(), match[1]
-                if field in ('type', 'block_size', 'label'):
-                    setattr(ns, field, value)
-            if not hasattr(ns, 'type'):
-                continue
-            if not hasattr(ns, 'label'):
-                ns.label = ''
-            ns.dev = os.path.basename(line.split(': ', maxsplit=1)[0])
-            devs[ns.dev] = ns
-        if self.DB:
-            print('DB: --->>> after load_devs()')
-            for dev, ns in devs.items():
-                print(f'DB: {dev}: {vars(ns)}')
-        return devs
-
-    @staticmethod
-    def get_partition_sizes():
-        """
-        Get the sizes of all block partitions on the system, including those with unknown or no filesystems.
-
-        :return: A dictionary with device names as keys and sizes in bytes as values.
-        """
-        partition_sizes = {}
-        block_devices = os.listdir('/sys/block/')
-
-        for device in block_devices:
-            device_path = f'/sys/block/{device}'
-
-            # Check for partitions inside each block device
-            for entry in os.listdir(device_path):
-                partition_path = os.path.join(device_path, entry)
-
-                # If it's a partition (not the main device itself)
-                if os.path.isdir(partition_path) and entry.startswith(device):
-                    size_path = os.path.join(partition_path, 'size')
-                    try:
-                        with open(size_path, 'r', encoding='utf-8') as size_file:
-                            sectors = int(size_file.read().strip())
-                            # Size in bytes: sectors * 512
-                            size_bytes = sectors * 512
-                            partition_sizes[entry] = size_bytes
-                    except (FileNotFoundError, ValueError):
-                        continue  # Skip if there's an issue reading the size
-
-        return partition_sizes
-
-
-    @staticmethod
-    def _slurp_file(pathname):
-        with open(pathname, "r", encoding='utf-8') as fh:
-            return [line.strip() for line in fh]
-
-    @staticmethod
-    def get_filesystem_usage(path):
-        """Return the filesystem usage statistics for the given path."""
-        try:
-            statvfs = os.statvfs(path)
-        except Exception:
-            return None
-        return SimpleNamespace(
-            total = statvfs.f_frsize * statvfs.f_blocks,
-            used = statvfs.f_frsize * (statvfs.f_blocks - statvfs.f_bfree),
-            free = statvfs.f_frsize * statvfs.f_bfree,
-            available = statvfs.f_frsize * statvfs.f_bavail,
-        )
-
-    @staticmethod
-    def name_check(device_name):
-        """Check if device_name matches any pattern in whitelist."""
-        # Define whitelist patterns
-        WHITELIST = ['nvme*', 'sd*', 'hd*', 'mmcblk*']
-        BLACKLIST = ['zram*', 'ram*', 'dm-*', 'loop*', 'sr*']
-        for pattern in WHITELIST:
-            if fnmatch.fnmatch(device_name, pattern):
-                return 'whtLst'
-        for pattern in BLACKLIST:
-            if fnmatch.fnmatch(device_name, pattern):
-                return 'blkLst'
-        return ''
-
-    @staticmethod
-    def unwritable(device_name):
-        """Check if the device is writable."""
-        device_path = f'/dev/{device_name}'
-        try:
-            # Check if the device file exists and is writable
-            rv = os.access(device_path, os.W_OK)
-            return None if rv else 'notWr'
-        except FileNotFoundError:
-            return 'notFnd'
-
-    @staticmethod
-    def is_zappable(device_name):
-        """Check if a device is a writable block device using whitelist and attributes."""
-        # Check whitelist first
-        state = DiskWipe.name_check(device_name)
-        if state == 'whtLst':
-            # print(f"{device_name} whitelisted")
-            return True
-        if state == 'blkLst':
-            # print(f"{device_name} blacklisted")
-            return False
-
-        # Check writable status
-        if DiskWipe.unwritable(device_name):
-            print(f"{device_name} is not writable")
-        return True  # Unsure is OK
-
-    def _determine_mount_points(self):
-        if self.mounts_lines is None:
-            self.mounts_lines = self._slurp_file('/proc/mounts')
-        rv = {}
-        for line in self.mounts_lines:
-            mat = re.match(r'/dev/([^/]*)\s', line)
-            if not mat:
-                continue
-            name = mat.group(1)
-
-            wds = re.split(r'\s+', line)
-            if len(wds) < 4:
-                continue
-            mount, fstype = wds[1], wds[2]
-            if name not in rv:
-                rv[name] = SimpleNamespace(fstype=fstype, mounts=[])
-            rv[name].mounts.append(mount)
-        return rv
-
-    def init_partitions(self):
-        """ TBD """
-        devs = self._load_devs()
-        mounts = self._determine_mount_points()
-        sizes = self.get_partition_sizes()
-        # print(f'{sizes=}')
-        # print(f'{mounts=}')
-        lines = self._slurp_file('/proc/partitions')
-        for line in lines:
-            if not re.match(r'\b\d+\s+\d+\b', line):
-                continue
-            wds = line.split(maxsplit=3)
-            if len(wds) < 4:
-                continue
-            major, minor, _, name = line.split(maxsplit=3)
-            major, minor = int(major), int(minor)
-            if major in self.virtual_majors:
-                continue
-            if major not in self.phys_majors:
-                if self.is_zappable(name):
-                    self.phys_majors.add(major)
-                else:
-                    self.virtual_majors.add(major)
-                    continue
-            self.partitions[name] = ns = self._make_partition_namespace(
-                    major=major, minor=minor, name=name)
-
-            if name in mounts:
-                ns.fstype = mounts[name].fstype
-                ns.mounts = mounts[name].mounts
-                info = self.get_filesystem_usage(ns.mounts[0])
-                if info:
-                    ns.used_bytes = info.used
-                    ns.size_bytes = info.total
-
-            if not ns.size_bytes:
-                ns.size_bytes = sizes.get(name, None)
-            if not ns.size_bytes:
-                info = self.get_device_size(name)
-                if info:
-                    ns.size_bytes = info.total_size
-
-            if name in devs:
-                ns.blk_size = devs[name].block_size
-                ns.fstype = devs[name].type
-                ns.label = devs[name].label
-
-            if ns.mounts:
-                ns.state = 'Mnt'
-                
-        all_names = list(self.partitions.keys())
-        for name, part in self.partitions.items():
-            for parent_name in all_names:
-                if name[:-1].startswith(parent_name):
-                    parent = ns.parent = self.partitions[parent_name]
-                    parent.minors.append(part)
-                    self.disks[parent_name] = parent
-                    if not parent.fstype:
-                        parent.fstype = 'DISK'
-                    break
-
-        for ns in self.partitions.values():
-            for minor in ns.minors:
-                if minor.state != '-':
-                    ns.state = minor.state
-                    break
-
-        wids = self.wids = SimpleNamespace(name=4, state=4, label=5, fstype=4, human=6)
-        for ns in self.partitions.values():
-            wids.name = max(wids.name, len(ns.name))
-            wids.label = max(wids.label, len(ns.label))
-            wids.fstype = max(wids.fstype, len(ns.fstype))
-        self.head_str = self.get_head_str()
-        for ns in self.partitions.values():
-            print(self.part_str(ns))
-
-    def get_head_str(self):
-        """ TBD """
-        wids = self.wids
-        emit = f'{"STAT":-^{wids.state}}'
-        emit += f' {"NAME":-^{wids.name}}'
-        emit += f' {"SIZE":-^{wids.human}}'
-        emit += f' {"TYPE":-^{wids.fstype}}'
-        emit += f' {"LABEL":-^{wids.label}}'
-        emit += ' MOUNTS'
-        return emit
-
-    def part_str(self, partition):
-        """ Convert partition to human value. """
-        ns = partition # shorthand
-        wids = self.wids
-        emit = f'{ns.state:>{wids.state}}'
-        emit += f' {ns.name:<{wids.name}}'
-        emit += f' {human(ns.size_bytes):>{wids.human}}'
-        emit += f' {ns.fstype:>{wids.fstype}}'
-        emit += f' {ns.label:>{wids.label}}'
-        emit += f' {",".join(ns.mounts)}'
-        return emit
-
     def do_key(self, key):
         """ TBD """
         def stop_if_idle(part):
@@ -566,20 +508,20 @@ class DiskWipe:
             for part in self.partitions.values():
                 rv += stop_if_idle(part)
             return rv # number jobs running
-        
+
         def exit_if_no_jobs():
             if stop_all() == 0:
                 self.win.stop_curses()
                 os.system('clear; stty sane')
                 sys.exit(0)
             return True  # continue running
-        
+
         if self.exit_when_no_jobs:
             return exit_if_no_jobs()
 
         if not key:
             return True
-        if key == cs.KEY_ENTER or key == 10: # Handle ENTER
+        if key in (cs.KEY_ENTER, 10): # Handle ENTER
             if self.opts.help_mode:
                 self.opts.help_mode = False
                 return None
@@ -648,7 +590,7 @@ class DiskWipe:
 
             return None
         return None
-    
+
     def get_keys_line(self):
         """ TBD """
         # EXPAND
@@ -665,7 +607,7 @@ class DiskWipe:
         # for action in self.actions:
             # line += f' {action[0]}:{action}'
         return line[1:]
-    
+
     def get_actions(self, part):
         """ Determine the type of the current line and available commands."""
         name, actions = '', {}
@@ -688,7 +630,7 @@ class DiskWipe:
         spin = self.spin = OptionSpinner()
         spin.default_obj = self.opts
         spin.add_key('help_mode', '? - toggle help screen', vals=[False, True])
-        other = 'ws/Sq'  # TODO: fix me
+        other = 'ws/Sq'
         other_keys = set(ord(x) for x in other)
         other_keys.add(cs.KEY_ENTER)
         other_keys.add(27) # ESCAPE
@@ -739,13 +681,13 @@ class DiskWipe:
                         partition.mounts = [f'{elapsed} {rate} REM:{until}']
 
                     if wanted(name) or partition.job:
-                        partition.line = self.part_str(partition)
+                        partition.line = self.dev_info.part_str(partition)
                         self.win.add_body(partition.line)
                         self.visibles.append(partition)
 
                 self.win.add_header(self.get_keys_line(), attr=cs.A_BOLD)
 
-                self.win.add_header(self.head_str)
+                self.win.add_header(self.dev_info.head_str)
                 _, col = self.win.head.pad.getyx()
                 pad = ' ' * (self.win.get_pad_width()-col)
                 self.win.add_header(pad, resume=True)
@@ -778,9 +720,6 @@ def main():
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
             help='show in "curses" window [disables: -D,-t,-L]')
     opts = parser.parse_args()
-    # opts.dry_run = True         # TODO: remove (for development)
-    # DB(0, f'opts={opts}')
-    dwipe = None
 
     try:
         if os.geteuid() != 0:
@@ -788,8 +727,11 @@ def main():
             rerun_module_as_root('dwipe.main')
 
         dwipe = DiskWipe(opts=opts)
-        dwipe.init_partitions()
-        
+        dwipe.dev_info = info = DeviceInfo(opts=opts)
+        dwipe.partitions = info.assemble_partitions()
+        if dwipe.DB:
+            sys.exit(1)
+
         dwipe.main_loop()
     except Exception as exce:
         if dwipe and dwipe.win:
