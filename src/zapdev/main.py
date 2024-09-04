@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """ TBD
-PYTHONPATH=src python3 zapdev.main
-PYTHONPATH=src python src/zapdev/main.py
-
-
 
 
 """
 # pylint: disable=too-many-branches,too-many-statements,import-outside-toplevel
 # pylint: disable=too-many-instance-attributes,invalid-name
 # pylint: disable=broad-exception-caught,consider-using-with
-# pylint: disable=too-many-return-statements
+# pylint: disable=too-many-return-statements,too-many-locals
 
 import os
 import fnmatch
@@ -21,6 +17,7 @@ import time
 import threading
 import random
 import shutil
+import traceback
 import curses as cs
 from types import SimpleNamespace
 from typing import Tuple, List
@@ -36,6 +33,27 @@ def human(number):
         if number < 99.95 or not suffixes:
             return f'{number:.1f}{suffix}'
     return None
+##############################################################################
+def ago_str(delta_secs, signed=False):
+    """ Turn time differences in seconds to a compact representation;
+        e.g., '18h·39m'
+    """
+    ago = int(max(0, round(delta_secs if delta_secs >= 0 else -delta_secs)))
+    divs = (60, 60, 24, 7, 52, 9999999)
+    units = ('s', 'm', 'h', 'd', 'w', 'y')
+    vals = (ago%60, int(ago/60)) # seed with secs, mins (step til 2nd fits)
+    uidx = 1 # best units
+    for div in divs[1:]:
+        # print('vals', vals, 'div', div)
+        if vals[1] < div:
+            break
+        vals = (vals[1]%div, int(vals[1]/div))
+        uidx += 1
+    rv = '-' if signed and delta_secs < 0 else ''
+    rv += f'{vals[1]}{units[uidx]}' if vals[1] else ''
+    rv += f'{vals[0]:d}{units[uidx-1]}'
+    return rv
+
 
 class ZapJob:
     """ TBD """
@@ -55,14 +73,14 @@ class ZapJob:
         self.status_lock = threading.Lock()  # TODO: remove
         self.thread = None
 
-        self.start_mono = None
+        self.start_mono = time.monotonic()  # Track the start time
         self.total_written = 0
         self.done = False
 
     @staticmethod
-    def start_job(device_path, total_size):
+    def start_job(device_path, total_size, opts):
         """ TBD """
-        job = ZapJob(device_path=device_path, total_size=total_size)
+        job = ZapJob(device_path=device_path, total_size=total_size, opts=opts)
         job.thread = threading.Thread(target=job.write_random_chunk)
         job.thread.start()
         return job
@@ -75,26 +93,39 @@ class ZapJob:
         return (f"Write rate: {write_rate / (1024 * 1024):.2f} MB/s, "
                          f"Completed: {percent_complete:.2f}%")
 
+    def get_status(self):
+        """ TBD """
+        pct_str, rate_str, when_str = '', '', ''
+        elapsed_time = time.monotonic() - self.start_mono
+        rate = self.total_written / elapsed_time if elapsed_time > 0 else 0
+        rate_str = f'{human(int(round(rate, 0)))}/s'
+
+        pct = (self.total_written / self.total_size) * 100
+        pct_str = f'{int(round(pct, 0))}%'
+        if self.do_abort:
+            pct_str = 'STOP'
+        
+        if rate > 0:
+            when = int(round((self.total_size - self.total_written)/rate, 0))
+            when_str = ago_str(when)
+        return pct_str, rate_str, when_str
+
     def write_random_chunk(self):
         """Writes random chunks to a device and updates the progress status."""
         self.total_written = 0  # Track total bytes written
-        self.start_mono = time.monotonic()  # Track the start time
 
-        # Open the block device for writing
-        # with open(self.device_path, 'wb', encoding='utf-8') as device:
         with open(self.device_path, 'wb') as device:
-            for loop in range(10000000000):
+            # for loop in range(10000000000):
+            while True:
                 if self.do_abort:
                     break
-                # Choose a random offset in the range [0, 1MB - 16KB)
                 offset = random.randint(0, ZapJob.BUFFER_SIZE - ZapJob.WRITE_SIZE)
                 # Use memoryview to avoid copying the data
                 chunk = memoryview(ZapJob.buffer)[offset:offset + ZapJob.WRITE_SIZE]
-                # Write the 16KB chunk directly to the block device # TODO actually write
+
                 if self.opts.dry_run:
-                    bytes_written = ZapJob.WRITE_SIZE
-                    if loop % 8 == 0:
-                        time.sleep(0.000001)
+                    bytes_written = self.total_size // 120
+                    time.sleep(0.25)
                 else:
                     bytes_written = device.write(chunk)
                 self.total_written += bytes_written
@@ -119,9 +150,10 @@ class ZapDev:
         self.phys_majors = set() # major devices that are physical devices
         self.virtual_majors = set() # major devices that are NOT physical devices
         self.blkid_lines = None
-        self.majors = {}    # devices with minor==0
+        self.disks = {}    # devices that don't have another device as prefix
         self.wids = None
         self.head_str = None
+        self.job_cnt = 0
 
         self.prev_filter = '' # string
         self.filter = None # compiled pattern
@@ -179,6 +211,7 @@ class ZapDev:
         return SimpleNamespace(name=name,       # /proc/partitions
                             major=major,       # /proc/partitions
                             minor=minor,       # /proc/partitions
+                            parent=None,     # a partition
                             state='-',         # run-time
                             label='',       # blkid
                             blk_size=None,       # blkid
@@ -294,8 +327,6 @@ class ZapDev:
         :return: A dictionary with device names as keys and sizes in bytes as values.
         """
         partition_sizes = {}
-
-        # List all block devices and their partitions
         block_devices = os.listdir('/sys/block/')
 
         for device in block_devices:
@@ -447,17 +478,19 @@ class ZapDev:
                 ns.fstype = devs[name].type
                 ns.label = devs[name].label
 
-            if ns.minor == 0:
-                self.majors[ns.major] = ns
-
             if ns.mounts:
                 ns.state = 'Mnt'
-
-        for ns in self.partitions.values():
-            if ns.minor > 0:
-                major = self.majors.get(ns.major, None)
-                if major:
-                    major.minors.append(ns)
+                
+        all_names = list(self.partitions.keys())
+        for name, part in self.partitions.items():
+            for parent_name in all_names:
+                if name[:-1].startswith(parent_name):
+                    parent = ns.parent = self.partitions[parent_name]
+                    parent.minors.append(part)
+                    self.disks[parent_name] = parent
+                    if not parent.fstype:
+                        parent.fstype = 'DISK'
+                    break
 
         for ns in self.partitions.values():
             for minor in ns.minors:
@@ -490,7 +523,7 @@ class ZapDev:
         ns = partition # shorthand
         wids = self.wids
         emit = f'{ns.state:>{wids.state}}'
-        emit += f' {ns.name:>{wids.name}}'
+        emit += f' {ns.name:<{wids.name}}'
         emit += f' {human(ns.size_bytes):>{wids.human}}'
         emit += f' {ns.fstype:>{wids.fstype}}'
         emit += f' {ns.label:>{wids.label}}'
@@ -525,13 +558,26 @@ class ZapDev:
             os.system('clear; stty sane')
             sys.exit(0)
 
-        if key == ord('s') and not self.pick_is_running:
-            return None  # TODO: start zap job
+        if key == ord('w') and not self.pick_is_running:
+            part = self.partitions[self.pick_name]
+            if part.state in ('-', 'W', 's'):
+                ans = self.win.answer(f'Type "y" to wipe {repr(part.name)}'
+                       + f' ({human(part.size_bytes)} {part.fstype} {part.label})')
+                if ans.strip().lower().startswith('y'):
+                    part.job = ZapJob.start_job(f'/dev/{part.name}',
+                                        part.size_bytes, opts=self.opts)
+                    self.job_cnt += 1
+                    part.state = '0%'
+            return None
 
-        if key == ord('k') and self.pick_is_running:
-            return None  # TODO: stop job
+        if key == ord('s') and self.pick_is_running:
+            part = self.partitions[self.pick_name]
+            if part.state[-1] == '%':
+                if part.job and not part.job.done:
+                    part.job.do_abort = True
+            return None
 
-        if key == ord('K'):
+        if key == ord('S'):
             return None # TODO: kill running jobs
 
         if key == ord('/'):
@@ -587,12 +633,13 @@ class ZapDev:
         if 0 <= self.win.pick_pos < len(lines):
             # line = lines[self.win.pick_pos]
             part = self.visibles[self.win.pick_pos]
+            name = part.name
             self.pick_is_running = bool(part.job)
             # EXPAND
             if self.pick_is_running:
-                actions['k'] = 'kill'
-            elif part.state == '-':
-                actions['s'] = 'start'
+                actions['s'] = 'stop'
+            elif part.state in ('-', 'W', 's'):
+                actions['w'] = 'wipe'
         return name, actions
 
     def main_loop(self):
@@ -601,7 +648,7 @@ class ZapDev:
         spin = self.spin = OptionSpinner()
         spin.default_obj = self.opts
         spin.add_key('help_mode', '? - toggle help screen', vals=[False, True])
-        other = 'sk/Kqx'  # TODO: fix me
+        other = 'ws/Sq'  # TODO: fix me
         other_keys = set(ord(x) for x in other)
         other_keys.add(cs.KEY_ENTER)
         other_keys.add(27) # ESCAPE
@@ -635,23 +682,36 @@ class ZapDev:
                     return not self.filter or self.filter.search(name)
                 # self.win.set_pick_mode(self.opts.pick_mode, self.opts.pick_size)
                 self.win.set_pick_mode(True)
+
+                self.visibles = []
+                for name, partition in self.partitions.items():
+                    partition.line = None
+                    if partition.job:
+                        if partition.job.done:
+                            partition.job.thread.join()
+                            partition.state = 's' if partition.job.do_abort else 'W'
+                            partition.job = None
+                            partition.mounts = []
+                            self.job_cnt -= 1
+                    if partition.job:
+                        pct, rate, until = partition.job.get_status()
+                        partition.state = pct
+                        partition.mounts = [f'{rate} ETA:{until}']
+
+                    if wanted(name) or partition.job:
+                        partition.line = self.part_str(partition)
+                        self.win.add_body(partition.line)
+                        self.visibles.append(partition)
+
                 self.win.add_header(self.get_keys_line(), attr=cs.A_BOLD)
 
                 self.win.add_header(self.head_str)
                 _, col = self.win.head.pad.getyx()
                 pad = ' ' * (self.win.get_pad_width()-col)
                 self.win.add_header(pad, resume=True)
-
-                self.visibles = []
-                for name, partition in self.partitions.items():
-                    partition.line = None
-                    if wanted(name) or partition.job:
-                        partition.line = self.part_str(partition)
-                        self.win.add_body(partition.line)
-                        self.visibles.append(partition)
             self.win.render()
 
-            _ = self.do_key(self.win.prompt(seconds=300))
+            _ = self.do_key(self.win.prompt(seconds=3))
             self.win.clear()
 
 
@@ -678,34 +738,25 @@ def main():
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
             help='show in "curses" window [disables: -D,-t,-L]')
     opts = parser.parse_args()
+    # opts.dry_run = True         # TODO: remove (for development)
     # DB(0, f'opts={opts}')
+    zapdev = None
 
-    if os.geteuid() != 0:
-        # Re-run the script with sudo needed and opted
-        rerun_module_as_root('zapdev.main')
+    try:
+        if os.geteuid() != 0:
+            # Re-run the script with sudo needed and opted
+            rerun_module_as_root('zapdev.main')
 
-    zapdev = ZapDev(opts=opts)
-    zapdev.init_partitions()
-    
-    zapdev.main_loop()
-
-
-#   if False:
-#       job = ZapJob.start_job('/dev/sdb3', 100 * 1024 * 1024 * 1024)
-#       while not job.done:
-#           print(job.get_status_str())
-#           time.sleep(2)
-#       job.thread.join()
-#   else:
-#       time.sleep(2)
-
-#   devices = get_device_info()
-#   display_device_list(devices)
-#   chosen_device = choose_device(devices)
-#   if chosen_device:
-#       print(f"You selected: {chosen_device}")
-#   else:
-#       print("No device selected.")
+        zapdev = ZapDev(opts=opts)
+        zapdev.init_partitions()
+        
+        zapdev.main_loop()
+    except Exception as exce:
+        if zapdev and zapdev.win:
+            zapdev.win.stop_curses()
+        print("exception:", str(exce))
+        print(traceback.format_exc())
+        sys.exit(15)
 
 if __name__ == "__main__":
     main()

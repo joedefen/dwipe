@@ -1,6 +1,8 @@
 # zapdev
 `zapdev` is yet-another-tool to wiped disks and partitions for Linux for security.
 
+> **WORK-IN-PROGRESS**: soon this will be complete and deployed to PyPi.org. Until then, patiently await completion.
+
 * Install `zapdev` using `pipx install zapdev`, or however you do so.
 
 
