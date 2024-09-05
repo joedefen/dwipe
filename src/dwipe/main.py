@@ -166,6 +166,7 @@ class DeviceInfo:
         self.DB = opts.debug
         self.wids = None
         self.head_str = None
+        self.partitions = None
 
     @staticmethod
     def _make_partition_namespace(major, minor, name, size_bytes):
@@ -309,7 +310,7 @@ class DeviceInfo:
 
         return disks
 
-    def filter_partitions(self, nss):
+    def get_disk_partitions(self, nss):
         """ Determine which partitions we want some are bogus like zram """
 
         def whitelisted(device_name):
@@ -359,7 +360,7 @@ class DeviceInfo:
 
         wids = self.wids = SimpleNamespace(name=4, state=4, label=5, fstype=4, human=6)
         for ns in nss.values():
-            wids.name = max(wids.name, len(ns.name))
+            wids.name = max(wids.name, len(ns.name)+2)
             wids.label = max(wids.label, len(ns.label))
             wids.fstype = max(wids.fstype, len(ns.fstype))
         self.head_str = self.get_head_str()
@@ -381,16 +382,34 @@ class DeviceInfo:
         """ Convert partition to human value. """
         ns = partition # shorthand
         wids = self.wids
-        emit = f'{ns.state:>{wids.state}}'
-        emit += f' {ns.name:<{wids.name}}'
+        emit = f'{ns.state:^{wids.state}}'
+        prefix = '' if ns.parent is None else '⮞ '
+        suffix = '  ' if ns.parent is None else ''
+        emit += f' {prefix}{ns.name:<{wids.name}}{suffix}'
         emit += f' {human(ns.size_bytes):>{wids.human}}'
         emit += f' {ns.fstype:>{wids.fstype}}'
         emit += f' {ns.label:>{wids.label}}'
         emit += f' {",".join(ns.mounts)}'
         return emit
 
+    def merge_dev_infos(self, nss, prev_nss=None):
+        """ Merge old DevInfos into new DevInfos  """
+        if not prev_nss:
+            return nss
+        for name, ns in prev_nss.items():
+            if not ns.job:
+                continue
+            new_ns = nss.get(name, None)
+            if new_ns:
+                new_ns.job = ns.job
+                new_ns.state = ns.state
+            else:
+                nss[name] = ns # carry forward
+                if ns.job:
+                    ns.job.do_abort = True
+        return nss
 
-    def assemble_partitions(self):
+    def assemble_partitions(self, prev_nss=None):
         """ TBD """
         devs = self.get_block_devs()
         mounts = self.determine_mount_points()
@@ -416,7 +435,10 @@ class DeviceInfo:
 
         self.make_linkages(nss) # find parent child relationships
 
-        nss = self.filter_partitions(nss)
+        nss = self.get_disk_partitions(nss)
+
+        nss = self.merge_dev_infos(nss, prev_nss)
+
         self.compute_field_widths(nss)
 
         if self.DB:
@@ -435,11 +457,7 @@ class DiskWipe:
         self.DB = bool(self.opts.debug)
         self.mounts_lines = None
         self.partitions = {} # a dict of namespaces keyed by name
-        self.visibles = []   # visible partitions
-        #self.phys_majors = set() # major devices that are physical devices
-        # self.virtual_majors = set() # major devices that are NOT physical devices
-        # self.blkid_lines = None
-        # self.disks = {}    # devices that don't have another device as prefix
+        self.visibles = []   # visible partitions given the filter
         self.wids = None
         self.job_cnt = 0
         self.exit_when_no_jobs = False
@@ -630,15 +648,16 @@ class DiskWipe:
         spin = self.spin = OptionSpinner()
         spin.default_obj = self.opts
         spin.add_key('help_mode', '? - toggle help screen', vals=[False, True])
-        other = 'ws/Sq'
+        other = 'ws/Sqx'
         other_keys = set(ord(x) for x in other)
         other_keys.add(cs.KEY_ENTER)
-        other_keys.add(27) # ESCAPE
         other_keys.add(10) # another form of ENTER
+        other_keys.add(27) # ESCAPE
 
         self.win = Window(head_line=True, body_rows=200, head_rows=4,
                           keys=spin.keys ^ other_keys, mod_pick=self.mod_pick)
         self.opts.name = "[hit 'n' to enter name]"
+        check_devices_mono = time.monotonic()
         while True:
             if self.opts.help_mode:
                 self.win.set_pick_mode(False)
@@ -646,15 +665,15 @@ class DiskWipe:
                 self.spin.show_help_body(self.win)
                 # EXPAND
                 lines = [
+                    'CONTEXT SENSITIVE:',
+                    '   w - wipe device',
+                    '   s - stop wipe device',
                     'GENERALLY AVAILABLE:',
-                    '   K - kill ALL zaps in progress (if any)',
+                    '   S - stop ALL wipes in progress',
                     '   q or x - quit program (CTL-C disabled)',
                     '   / - filter devices by (anchored) regex',
                     '   ESC = clear filter and jump to top',
-                    '   ENTER = stat, kill, or return from help',
-                    'CONTEXT SENSITIVE:',
-                    '   s - start zap of device',
-                    '   k - kill zap of device',
+                    '   ENTER = return from help',
 
                 ]
                 for line in lines:
@@ -694,6 +713,13 @@ class DiskWipe:
             self.win.render()
 
             _ = self.do_key(self.win.prompt(seconds=3))
+
+            if time.monotonic() - check_devices_mono > 5.0:
+                info = DeviceInfo(opts=self.opts)
+                self.partitions = info.assemble_partitions(self.partitions)
+                self.dev_info = info
+                check_devices_mono = time.monotonic()
+
             self.win.clear()
 
 
