@@ -1,8 +1,6 @@
 # dwipe
 `dwipe` to wipe disks and partitions for Linux for your security.
 
-> **WORK-IN-PROGRESS**: soon this will be complete and deployed to PyPi.org. Until then, patiently await completion.
-
 * Install `dwipe` using `pipx install dwipe`, or however you python scripts from PyPi.org.
 
 
@@ -11,15 +9,15 @@
 * allows starting multiple wipes and shows their progress.
 * allows filtering for devices by name in case of too many for one screen.
 * allows stopping wipes in progress.
-* not offering to wipe disks that are mounted or would have conflicting/overlapping wipes in progress.
-* allowing to "lock" a disk to prevent mistaken wipes on that disk.
+* avoids offering to wipe disks that are mounted or would have conflicting/overlapping wipes in progress.
+* allows to "lock" a disk to prevent mistaken wipes on that disk.
   
 ## Usage
 * Run `dwipe` from the command line.
 
 Here is a typical screen:
 
-![dwipe-main](https://github.com/joedefen/dwipe/blob/main/resources/dwipe-main-screen.png?raw=true)
+![dwipe-help](https://raw.githubusercontent.com/joedefen/dwipe/master/resources/dwipe-main-screen.png?raw=true)
 
 The possible state values and meaning are:
 * **-** : indicates the device is ready for wiping if desired.
@@ -48,4 +46,4 @@ The write rate and estimating remaining times are shown when wiping a device.  D
 ### The Help Screen
 When **?** is typed, the help screen looks like:
 
-![dwipe-help](https://github.com/joedefen/dwipe/blob/main/resources/dwipe-help-screen.png?raw=true)
+![dwipe-help](https://raw.githubusercontent.com/joedefen/dwipe/master/resources/dwipe-help-screen.png?raw=true)
