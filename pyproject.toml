@@ -19,16 +19,9 @@
 #   - source env/bin/activate # to activate
 #   - deactivate # to deactivate
 # 
-# rm -rf ./dist && python3 -m build && pip install -e . --break-system-packages
-#
-#    -OR-
-# python3 -m dwipe.main
-#
-#    -OR-
-# cd src/dwipe && ./main.py
-#
-#    -OR-
-# src/dwipe/main.py
+# For a "live" local install:
+#  ./deploy  # uninstall: pip uninstall dwipe # to remove
+# To run:   ./run.sh
 
 # HOW TO PUBLISH...
 # PUBLIC Build and deploy (from project directory):
@@ -54,7 +47,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dwipe"
-version = "0.9.2"
+version = "1.0.0"
 description = "A tool to wipe disks and partitions for Linux"
 authors = [
     { name = "Joe Defen", email = "joedef@google.com" }

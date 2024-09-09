@@ -83,7 +83,7 @@ class WipeJob:
     def start_job(device_path, total_size, opts):
         """ TBD """
         job = WipeJob(device_path=device_path, total_size=total_size, opts=opts)
-        job.thread = threading.Thread(target=job.write_random_chunk)
+        job.thread = threading.Thread(target=job.write_partition)
         job.wr_hists.append(SimpleNamespace(mono=time.monotonic(), written=0))
         job.thread.start()
         return job
@@ -123,19 +123,22 @@ class WipeJob:
 
         return ago_str(int(round(elapsed_time))), pct_str, rate_str, when_str
 
-    def write_random_chunk(self):
+    def write_partition(self):
         """Writes random chunks to a device and updates the progress status."""
         self.total_written = 0  # Track total bytes written
-        first_write = True
+        is_random = self.opts.random
 
         with open(self.device_path, 'wb') as device:
             # for loop in range(10000000000):
+            offset = 0
+            chunk = memoryview(WipeJob.zero_buffer)
             while True:
                 if self.do_abort:
                     break
-                offset = random.randint(0, WipeJob.BUFFER_SIZE - WipeJob.WRITE_SIZE)
-                # Use memoryview to avoid copying the data
-                chunk = memoryview(WipeJob.buffer)[offset:offset + WipeJob.WRITE_SIZE]
+                if is_random:
+                    offset = random.randint(0, WipeJob.BUFFER_SIZE - WipeJob.WRITE_SIZE)
+                    # Use memoryview to avoid copying the data
+                    chunk = memoryview(WipeJob.buffer)[offset:offset + WipeJob.WRITE_SIZE]
 
                 if self.opts.dry_run:
                     bytes_written = self.total_size // 120
@@ -145,8 +148,6 @@ class WipeJob:
                         bytes_written = device.write(chunk)
                     except Exception:
                         bytes_written = 0
-                if first_write:
-                    first_write = False
                 self.total_written += bytes_written
                 # Optional: Check for errors or incomplete writes
                 if bytes_written < WipeJob.WRITE_SIZE:
@@ -155,7 +156,7 @@ class WipeJob:
                     break
             # clear the beginning of device whether aborted or not
             # if we have started writing
-            if not self.opts.dry_run and self.total_written > 0:
+            if not self.opts.dry_run and self.total_written > 0 and is_random:
                 device.seek(0)
                 chunk = memoryview(WipeJob.zero_buffer)
                 bytes_written = device.write(chunk)
@@ -182,6 +183,7 @@ class DeviceInfo:
             dflt=dflt,         # default run-time state
             label='',       # blkid
             fstype='',      # blkid
+            # fsuse='-',
             size_bytes=size_bytes,  # /sys/block/{name}/...
             mounts=[],        # /proc/mounts
             minors=[],
@@ -206,7 +208,9 @@ class DeviceInfo:
                 entry.label=device.get('partlabel', '')
             if entry.label is None:
                 entry.label = ''
-            # entry.fsuse=device.get('fsuse%', '')
+        #   entry.fsuse=device.get('fsuse%', '')
+        #   if entry.fsuse is None:
+        #       entry.fsuse = '-'
             entry.size_bytes=int(device.get('size', 0))
             mounts = device.get('mountpoints', [])
             while len(mounts) >= 1 and mounts[0] is None:
@@ -250,7 +254,8 @@ class DeviceInfo:
         """
         ready_states = ('s', 'W', '-', '^')
         job_states = ('*%', 'STOP')
-        inferred_states = ('Busy', 'Mnt')
+        inferred_states = ('Busy', 'Mnt', )
+        # other_states = ('Lock', 'Unlk')
 
         def state_in(to, states):
             return to in states or fnmatch(to, states[0])
@@ -267,6 +272,12 @@ class DeviceInfo:
 
         if to == 'STOP' and not state_in(ns.state, job_states):
             return False
+        if to == 'Lock' and (not state_in(ns.state, list(ready_states) + ['Mnt'])
+                or ns.parent):
+            return False
+        if to == 'Unlk' and ns.state != 'Lock':
+            return False
+
         if to and fnmatch(to, '*%'):
             if not state_in(ns.state, ready_states):
                 return False
@@ -285,7 +296,8 @@ class DeviceInfo:
         #  -- clearing these states will be done on the device
         #     refresh
         if parent and state_in(ns.state, inferred_states):
-            parent.state = ns.state
+            if parent.state != 'Lock':
+                parent.state = ns.state
         if state_in(ns.state, job_states):
             if parent:
                 parent.state = 'Busy'
@@ -347,9 +359,10 @@ class DeviceInfo:
     def compute_field_widths(self, nss):
         """ TBD """
 
-        wids = self.wids = SimpleNamespace(state=5, name=4, label=5, fstype=4, human=6)
+        wids = self.wids = SimpleNamespace(state=5, name=4, human=6, fstype=4, label=5)
         for ns in nss.values():
             wids.state = max(wids.state, len(ns.state))
+        #   wids.fsuse = max(wids.fsuse, len(ns.fsuse))
             wids.name = max(wids.name, len(ns.name)+2)
             if ns.label is None:
                 pass
@@ -366,6 +379,7 @@ class DeviceInfo:
         wids = self.wids
         emit = f'{"STATE":_^{wids.state}}'
         emit += f'{sep}{"NAME":_^{wids.name}}'
+    #   emit += f'{sep}{"USE%":_^{wids.fsuse}}'
         emit += f'{sep}{"SIZE":_^{wids.human}}'
         emit += f'{sep}{"TYPE":_^{wids.fstype}}'
         emit += f'{sep}{"LABEL":_^{wids.label}}'
@@ -374,9 +388,9 @@ class DeviceInfo:
 
     def part_str(self, partition):
         """ Convert partition to human value. """
-        def print_str_or_dashes(name, width):
+        def print_str_or_dashes(name, width, chrs=' -'):
             if not name.strip(): # Create a string of '─' characters of the specified width
-                result = ' .' * (width//2)
+                result = f'{chrs}' * (width//2)
                 result += ' ' * (width%2)
             else: # Format the name to be right-aligned within the specified width
                 result = f'{name:>{width}}'
@@ -386,12 +400,21 @@ class DeviceInfo:
         ns = partition # shorthand
         wids = self.wids
         emit = f'{ns.state:^{wids.state}}'
-        name_str = ('' if ns.parent is None else '⮞ ') + ns.name
+        # name_str = ('' if ns.parent is None else '⮞ ') + ns.name
+        #name_str = ('● ' if ns.parent is None else '  ') + ns.name
+        name_str = ('■ ' if ns.parent is None else '  ') + ns.name
+#       if ns.parent is None and 1 + len(name_str) <= wids.name:
+#           name_str += ' ' * (wids.name - len(name_str) - 1) + '■'
+
         emit += f'{sep}{name_str:<{wids.name}}'
+    #   emit += f'{sep}{ns.fsuse:^{wids.fsuse}}'
         emit += f'{sep}{human(ns.size_bytes):>{wids.human}}'
         emit += sep + print_str_or_dashes(ns.fstype, wids.fstype)
         # emit += f'{sep}{ns.fstype:>{wids.fstype}}'
-        emit += sep + print_str_or_dashes(ns.label, wids.label)
+        if ns.parent is None:
+            emit += sep + '■' + '─'*(wids.label-2) + '■' 
+        else:
+            emit += sep + print_str_or_dashes(ns.label, wids.label, chrs=' -')
         # emit += f' {ns.label:>{wids.label}}'
         emit += f'{sep}{",".join(ns.mounts)}'
         return emit
@@ -400,22 +423,24 @@ class DeviceInfo:
         """ Merge old DevInfos into new DevInfos  """
         if not prev_nss:
             return nss
-        for name, ns in prev_nss.items():
+        for name, prev_ns in prev_nss.items():
             # merge old jobs forward
             new_ns = nss.get(name, None)
             if new_ns:
-                if ns.job:
-                    new_ns.job = ns.job
-                new_ns.state = new_ns.dflt = ns.dflt
-                if ns.state not in ('Busy',): # re-infer these
-                    new_ns.state = ns.state
-            elif ns.job:
+                if prev_ns.job:
+                    new_ns.job = prev_ns.job
+                new_ns.state = new_ns.dflt = prev_ns.dflt
+                if prev_ns.state == 'Lock':
+                    pass
+                if prev_ns.state not in ('Busy', 'Unlk'): # re-infer these
+                    new_ns.state = prev_ns.state
+            elif prev_ns.job:
                 # unplugged device with job..
-                nss[name] = ns # carry forward
-                ns.job.do_abort = True
-        for name, ns in nss.items():
+                nss[name] = prev_ns # carry forward
+                prev_ns.job.do_abort = True
+        for name, prev_ns in nss.items():
             if name not in prev_nss:
-                ns.state = '^'
+                prev_ns.state = '^'
         return nss
 
     def assemble_partitions(self, prev_nss=None):
@@ -442,8 +467,7 @@ class DiskWipe:
     singleton = None
     def __init__(self, opts=None):
         DiskWipe.singleton = self
-        self.opts = opts if opts else SimpleNamespace( debug=0,
-                        dry_run=False, loop=2, search='', units='human')
+        self.opts = opts if opts else SimpleNamespace(debug=0, dry_run=False)
         self.DB = bool(self.opts.debug)
         self.mounts_lines = None
         self.partitions = {} # a dict of namespaces keyed by name
@@ -468,7 +492,7 @@ class DiskWipe:
     def check_preqreqs():
         """ Check that needed programs are installed. """
         ok = True
-        for prog in 'blkid lsblk'.split():
+        for prog in 'lsblk'.split():
             if shutil.which(prog) is None:
                 ok = False
                 print(f'ERROR: cannot find {prog!r} on $PATH')
@@ -581,6 +605,10 @@ class DiskWipe:
             for part in self.partitions.values():
                 stop_if_idle(part)
             return None
+        
+        if key == ord('l'):
+            part = self.partitions[self.pick_name]
+            self.set_state(part, 'Unlk' if part.state == 'Lock' else 'Lock')
 
         if key == ord('/'):
             # pylint: disable=protected-access
@@ -611,23 +639,24 @@ class DiskWipe:
 
     def get_keys_line(self):
         """ TBD """
-        # EXPAND
+        # KEYS
         line = ''
         for key, verb in self.pick_actions.items():
             if key[0] == verb[0]:
                 line += f' {verb}'
             else:
                 line += f' {key}:{verb}'
-        # or EXPAND
         line += ' ❚'
         line += ' Stop' if self.job_cnt > 0 else ''
-        line += f' quit ?:help /{self.prev_filter}  '
+        line += f' quit ?:help /{self.prev_filter}  Mode='
+        line += f'{"Random" if self.opts.random else "Zeros"}'
         # for action in self.actions:
             # line += f' {action[0]}:{action}'
         return line[1:]
 
     def get_actions(self, part):
         """ Determine the type of the current line and available commands."""
+        # KEYS
         name, actions = '', {}
         lines = self.win.body.texts
         if 0 <= self.win.pick_pos < len(lines):
@@ -640,6 +669,10 @@ class DiskWipe:
                 actions['s'] = 'stop'
             elif self.test_state(part, to='0%'):
                 actions['w'] = 'wipe'
+            if self.test_state(part, to='Lock'):
+                actions['l'] = 'lock'
+            if self.test_state(part, to='Unlk'):
+                actions['l'] = 'unlk'
         return name, actions
 
     def main_loop(self):
@@ -648,7 +681,9 @@ class DiskWipe:
         spin = self.spin = OptionSpinner()
         spin.default_obj = self.opts
         spin.add_key('help_mode', '? - toggle help screen', vals=[False, True])
-        other = 'ws/Sqx'
+        spin.add_key('random', 'r - toggle whether random or zeros', vals=[True, False])
+        # KEYS
+        other = 'wsl/Sqx'
         other_keys = set(ord(x) for x in other)
         other_keys.add(cs.KEY_ENTER)
         other_keys.add(10) # another form of ENTER
@@ -663,13 +698,14 @@ class DiskWipe:
                 self.win.set_pick_mode(False)
                 self.spin.show_help_nav_keys(self.win)
                 self.spin.show_help_body(self.win)
-                # EXPAND
+                # KEYS
                 lines = [
                     'CONTEXT SENSITIVE:',
                     '   w - wipe device',
                     '   s - stop wipe device',
-                    'GENERALLY AVAILABLE:',
+                    '   l - lock/unlock disk',
                     '   S - stop ALL wipes in progress',
+                    'GENERALLY AVAILABLE:',
                     '   q or x - quit program (CTL-C disabled)',
                     '   / - filter devices by (anchored) regex',
                     '   ESC = clear filter and jump to top',
@@ -701,6 +737,9 @@ class DiskWipe:
                         partition.state = pct
                         partition.mounts = [f'{elapsed} {rate} REM:{until}']
 
+                    if partition.parent and self.partitions[partition.parent].state == 'Lock':
+                        continue
+                    
                     if wanted(name) or partition.job:
                         partition.line = self.dev_info.part_str(partition)
                         self.win.add_body(partition.line)
@@ -742,12 +781,6 @@ def main():
             help='just pretend to zap devices')
     parser.add_argument('-D', '--debug', action='count', default=0,
             help='debug mode (the more Ds, the higher the debug level)')
-    parser.add_argument('-l', '--loop', type=int, default=0, dest='loop_secs',
-            help='loop interval in secs [dflt=0 if -w else 0]')
-    parser.add_argument('-/', '--search', default='',
-            help='show items with search string in name')
-    parser.add_argument('-W', '--no-window', action='store_false', dest='window',
-            help='show in "curses" window [disables: -D,-t,-L]')
     opts = parser.parse_args()
 
     try:
