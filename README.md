@@ -1,25 +1,28 @@
 # dwipe
-`dwipe` to wipe disks and partitions for Linux for your security.
+`dwipe` is tool to wipe disks and partitions for Linux helps secure you data. `dwipes` aims to reduce mistakes by providing ample information about your devices during selection.
 
-* Install `dwipe` using `pipx install dwipe`, or however you python scripts from PyPi.org.
+> **Quick Start:**
+> * Install `dwipe` using `pipx install dwipe`, or however you install python scripts from PyPi.org.
+> * Run `dwipe` from a terminal and observe the context sensitive help on the 1st line.
 
+To help with your disk scrubbing, `dwipe`:
+* shows disks and partitions that can be wiped along with selected information to help choose them (i.e.,; labels, sizes, and types); disallowed are mounted devices and overlapping wipes and manually "locked" disks.
+* updates the device list when it changes;  newly added devices are marked differently to make it easier to see them.
+* supports starting multiple wipes, shows their progress, and shows completion states.
+* supports either zeroing devices or filling with random data.
+* supports filtering for devices by name/pattern in case of too many for one screen, etc.
+* supports stopping wipes in progress.
 
-`dwipe` features include:
-* shows the disks and partitions that could be wiped along with useful information to help choose them (i.e., labels, sizes, and types)
-* allows starting multiple wipes and shows their progress.
-* allows filtering for devices by name in case of too many for one screen.
-* allows stopping wipes in progress.
-* avoids offering to wipe disks that are mounted or would have conflicting/overlapping wipes in progress.
-* allows to "lock" a disk to prevent mistaken wipes on that disk.
+`dwipe` shows file system labels, and if not the partition label.  It is best practice to label partitions and file systems well to make selection easier.
   
 ## Usage
-* Run `dwipe` from the command line.
+> Simply run `dwipe` from the command line w/o arguments normally. Its command line arguments mostly for debugging including "--dry-run" which lets you test/practice the interface w/o risk.
 
 Here is a typical screen:
 
 ![dwipe-help](https://raw.githubusercontent.com/joedefen/dwipe/master/resources/dwipe-main-screen.png?raw=true)
 
-The possible state values and meaning are:
+The possible state values and meanings are:
 * **-** : indicates the device is ready for wiping if desired.
 * **^** : similar to **-**, but also indicates the device was added after `dwipe` started
 * **Mnt** :  the partition is mounted or the disk has partitions that are mounted.  You cannot wipe the device in this state.
@@ -47,3 +50,5 @@ The write rate and estimating remaining times are shown when wiping a device.  D
 When **?** is typed, the help screen looks like:
 
 ![dwipe-help](https://raw.githubusercontent.com/joedefen/dwipe/master/resources/dwipe-help-screen.png?raw=true)
+
+You can navigate the list of devices with arrow keys and vi-like keys.

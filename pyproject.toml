@@ -26,8 +26,8 @@
 # HOW TO PUBLISH...
 # PUBLIC Build and deploy (from project directory):
 #   ## BUMP the version (below in [project])
-#   rm -rf dist; python3 -m build; ls dist/.
-#   python3 -m twine upload dist/*     # keyring --disable # may be required
+#   rm -rf dist && python3 -m build; ls dist/. && python3 -m twine upload dist/*
+#       NOTE:   # keyring --disable # may be required
 #     ## Enter __token__ and the saved TOKEN (in bitwarden)
 #   pipx upgrade dwipe || pipx install dwipe # >= python3.11
 #   --OR-- sudo python3 -m pip install dwipe # <= python3.10
@@ -47,7 +47,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dwipe"
-version = "1.0.0"
+version = "1.0.1"
 description = "A tool to wipe disks and partitions for Linux"
 authors = [
     { name = "Joe Defen", email = "joedef@google.com" }
@@ -56,7 +56,7 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.8"
 
-keywords = ["disk", "partition", "wipe", "clean", ]
+keywords = ["disk", "partition", "wipe", "clean", "scrub" ]
 
 classifiers = [
     "Programming Language :: Python :: 3",
