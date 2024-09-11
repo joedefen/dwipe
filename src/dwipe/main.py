@@ -30,9 +30,9 @@ def human(number):
     number = float(number)
     while suffixes:
         suffix = suffixes.pop(0)
-        number /= 1024
-        if number < 99.95 or not suffixes:
-            return f'{number:.1f}{suffix}'
+        number /= 1000 # decimal
+        if number < 999.95 or not suffixes:
+            return f'{number:.1f}{suffix}B' # decimal
     return None
 ##############################################################################
 def ago_str(delta_secs, signed=False):
@@ -183,12 +183,36 @@ class DeviceInfo:
             dflt=dflt,         # default run-time state
             label='',       # blkid
             fstype='',      # blkid
+            model='',       # /sys/class/block/{name}/device/vendor|model
             # fsuse='-',
             size_bytes=size_bytes,  # /sys/block/{name}/...
             mounts=[],        # /proc/mounts
             minors=[],
             job=None,         # if zap running
             )
+        
+
+    @staticmethod
+    def get_device_vendor_model(device_name):
+        """ Gets the vendor and model for a given device from the /sys/class/block directory.
+        - Args: - device_name: The device name, such as 'sda', 'sdb', etc.
+-       - Returns: A string containing the vendor and model information.
+        """
+        def get_str(device_name, suffix):
+            try:
+                rv = ''
+                fullpath = f'/sys/class/block/{device_name}/device/{suffix}'
+                with open(fullpath, 'r') as f: # Read information
+                    rv = f.read().strip()
+            except (FileNotFoundError, Exception) as exc:
+                # print(f"Error reading {info} for {device_name} : {e}")
+                pass
+            return rv
+
+        
+        rv = f'{get_str(device_name, "vendor")}'
+        rv += f'{get_str(device_name, "model")}'
+        return rv.strip()
 
     def parse_lsblk(self, dflt):
         """ Parse ls_blk for all the goodies we need """
@@ -228,6 +252,7 @@ class DeviceInfo:
         # Parse each block device and its properties
         for device in parsed_data['blockdevices']:
             parent = eat_one(device)
+            parent.fstype = self.get_device_vendor_model(parent.name)
             entries[parent.name] = parent
             for child in device.get('children', []):
                 entry = eat_one(child)
@@ -359,7 +384,7 @@ class DeviceInfo:
     def compute_field_widths(self, nss):
         """ TBD """
 
-        wids = self.wids = SimpleNamespace(state=5, name=4, human=6, fstype=4, label=5)
+        wids = self.wids = SimpleNamespace(state=5, name=4, human=7, fstype=4, label=5)
         for ns in nss.values():
             wids.state = max(wids.state, len(ns.state))
         #   wids.fsuse = max(wids.fsuse, len(ns.fsuse))
