@@ -45,6 +45,8 @@ The top line shows the "Mode" which is Random or Zeros. For some disks, zeroing 
 
 The write rate and estimating remaining times are shown when wiping a device.  Due to write queueing, the initial rates may be inflated, final rates are deflated, and the times are optimistic.
 
+The 'W' (Wiped) and 's' (partly wiped) states are disk persistent.  For those states, more information is provided about the wipe including when and percent complete.
+
 
 ### The Help Screen
 When **?** is typed, the help screen looks like:

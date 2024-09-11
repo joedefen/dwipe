@@ -15,13 +15,13 @@ import re
 import json
 import subprocess
 import time
+import datetime
 import threading
 import random
 import shutil
 import traceback
 import curses as cs
 from types import SimpleNamespace
-from typing import Tuple, List
 from dwipe.PowerWindow import Window, OptionSpinner
 
 def human(number):
@@ -62,6 +62,7 @@ class WipeJob:
     # Generate a 1MB buffer of random data
     BUFFER_SIZE = 1 * 1024 * 1024  # 1MB
     WRITE_SIZE = 16 * 1024  # 16KB
+    STATE_OFFSET = 15 * 1024 # where json is written
     buffer = bytearray(os.urandom(BUFFER_SIZE))
     zero_buffer = bytes(WRITE_SIZE)
 
@@ -123,6 +124,62 @@ class WipeJob:
 
         return ago_str(int(round(elapsed_time))), pct_str, rate_str, when_str
 
+    def prep_marker_buffer(self, is_random):
+        """  Get the 1st 16KB to write:
+             - 15K zeros
+             - JSON status + zero fill to 1KB
+        """
+        data = { "unixtime": int(time.time()),
+                    "scrubbed_bytes": self.total_written,
+                    "size_bytes": self.total_size,
+                    "mode": 'Rand' if is_random else 'Zero'
+                    }
+        json_data = json.dumps(data).encode('utf-8')
+        buffer = bytearray(self.BUFFER_SIZE)
+        buffer[:self.STATE_OFFSET] = b'\x00' * self.STATE_OFFSET
+        buffer[self.STATE_OFFSET:self.STATE_OFFSET+len(json_data)] = json_data
+        remaining_size = self.BUFFER_SIZE - (self.STATE_OFFSET+len(json_data))
+        buffer[self.STATE_OFFSET+len(json_data):] = b'\x00' * remaining_size
+        return buffer
+
+    @staticmethod
+    def read_marker_buffer(device_name):
+        """ Open the device and read the first 16 KB """
+        try:
+            with open(f'/dev/{device_name}', 'rb') as device:
+                device.seek(0)
+                buffer = device.read(WipeJob.BUFFER_SIZE)
+        except Exception:
+            return None # cannot find info
+
+        if buffer[:WipeJob.STATE_OFFSET] != b'\x00' * (WipeJob.STATE_OFFSET):
+            return None # First 15 KB are not zeros
+
+        # Extract JSON data from the next 1 KB Strip trailing zeros
+        json_data_bytes = buffer[WipeJob.STATE_OFFSET:WipeJob.BUFFER_SIZE].rstrip(b'\x00')
+
+        if not json_data_bytes:
+            return None # No JSON data found
+
+        # Deserialize the JSON data
+        try:
+            data = json.loads(json_data_bytes.decode('utf-8'))
+        except (json.JSONDecodeError, Exception):
+            return None # Invalid JSON data!
+
+        rv = {}
+        for key, value in data.items():
+            if key in ('unixtime', 'scrubbed_bytes', 'size_bytes') and isinstance(value, int):
+                rv[key] = value
+            elif key in ('mode', ) and isinstance(value, str):
+                rv[key] = value
+            else:
+                return None # bogus data
+        if len(rv) != 4:
+            return None # bogus data
+        return SimpleNamespace(**rv)
+
+
     def write_partition(self):
         """Writes random chunks to a device and updates the progress status."""
         self.total_written = 0  # Track total bytes written
@@ -155,11 +212,11 @@ class WipeJob:
                 if self.opts.dry_run and self.total_written >= self.total_size:
                     break
             # clear the beginning of device whether aborted or not
-            # if we have started writing
+            # if we have started writing + status in JSON
             if not self.opts.dry_run and self.total_written > 0 and is_random:
                 device.seek(0)
-                chunk = memoryview(WipeJob.zero_buffer)
-                bytes_written = device.write(chunk)
+                # chunk = memoryview(WipeJob.zero_buffer)
+                bytes_written = device.write(self.prep_marker_buffer(is_random))
         self.done = True
 
 class DeviceInfo:
@@ -186,11 +243,12 @@ class DeviceInfo:
             model='',       # /sys/class/block/{name}/device/vendor|model
             # fsuse='-',
             size_bytes=size_bytes,  # /sys/block/{name}/...
+            marker='',      #  persistent status
             mounts=[],        # /proc/mounts
             minors=[],
             job=None,         # if zap running
             )
-        
+
 
     @staticmethod
     def get_device_vendor_model(device_name):
@@ -202,16 +260,15 @@ class DeviceInfo:
             try:
                 rv = ''
                 fullpath = f'/sys/class/block/{device_name}/device/{suffix}'
-                with open(fullpath, 'r') as f: # Read information
+                with open(fullpath, 'r', encoding='utf-8') as f: # Read information
                     rv = f.read().strip()
-            except (FileNotFoundError, Exception) as exc:
+            except (FileNotFoundError, Exception):
                 # print(f"Error reading {info} for {device_name} : {e}")
                 pass
             return rv
 
-        
-        rv = f'{get_str(device_name, "vendor")}'
-        rv += f'{get_str(device_name, "model")}'
+        # rv = f'{get_str(device_name, "vendor")}' #vendor seems useless/confusing
+        rv = f'{get_str(device_name, "model")}'
         return rv.strip()
 
     def parse_lsblk(self, dflt):
@@ -240,6 +297,17 @@ class DeviceInfo:
             while len(mounts) >= 1 and mounts[0] is None:
                 del mounts[0]
             entry.mounts = mounts
+            if not mounts:
+                marker = WipeJob.read_marker_buffer(entry.name)
+                now = int(round(time.time()))
+                if (marker and marker.size_bytes == entry.size_bytes
+                        and 0 <= marker.scrubbed_bytes <= entry.size_bytes
+                        and marker.unixtime < now):
+                    pct = int(round((marker.scrubbed_bytes/marker.size_bytes)*100))
+                    state = 'W' if pct >= 100 else 's'
+                    dt = datetime.datetime.fromtimestamp(marker.unixtime)
+                    entry.marker = f'{state} {pct}% {marker.mode} {dt.strftime('%Y/%m/%d %H:%M')}'
+
             return entry
 
                # Run the `lsblk` command and get its output in JSON format with additional columns
@@ -265,6 +333,8 @@ class DeviceInfo:
                 if entry.mounts:
                     entry.state = 'Mnt'
                     parent.state = 'Mnt'
+                elif entry.marker:
+                    entry.state = entry.marker[0]
 
         if self.DB:
             print('\n\nDB: --->>> after parse_lsblk:')
@@ -408,18 +478,23 @@ class DeviceInfo:
         emit += f'{sep}{"SIZE":_^{wids.human}}'
         emit += f'{sep}{"TYPE":_^{wids.fstype}}'
         emit += f'{sep}{"LABEL":_^{wids.label}}'
-        emit += f'{sep}MOUNTS'
+        emit += f'{sep}MOUNTS/STATUS'
         return emit
 
     def part_str(self, partition):
         """ Convert partition to human value. """
-        def print_str_or_dashes(name, width, chrs=' -'):
-            if not name.strip(): # Create a string of '─' characters of the specified width
-                result = f'{chrs}' * (width//2)
-                result += ' ' * (width%2)
-            else: # Format the name to be right-aligned within the specified width
-                result = f'{name:>{width}}'
-            return result
+#       def print_str_or_dashes(name, width, chrs=' -'):
+#           if not name.strip(): # Create a string of '─' characters of the specified width
+#               result = f'{chrs}' * (width//2)
+#               result += ' ' * (width%2)
+#           else: # Format the name to be right-aligned within the specified width
+#               result = f'{name:>{width}}'
+#           return result
+
+        def print_str_or_dash(name, width, empty='-'):
+            if not name.strip(): # return
+                name = empty
+            return f'{name:^{width}}'
 
         sep = '  '
         ns = partition # shorthand
@@ -434,14 +509,17 @@ class DeviceInfo:
         emit += f'{sep}{name_str:<{wids.name}}'
     #   emit += f'{sep}{ns.fsuse:^{wids.fsuse}}'
         emit += f'{sep}{human(ns.size_bytes):>{wids.human}}'
-        emit += sep + print_str_or_dashes(ns.fstype, wids.fstype)
+        emit += sep + print_str_or_dash(ns.fstype, wids.fstype)
         # emit += f'{sep}{ns.fstype:>{wids.fstype}}'
         if ns.parent is None:
-            emit += sep + '■' + '─'*(wids.label-2) + '■' 
+            emit += sep + '■' + '─'*(wids.label-2) + '■'
         else:
-            emit += sep + print_str_or_dashes(ns.label, wids.label, chrs=' -')
+            emit += sep + print_str_or_dash(ns.label, wids.label)
         # emit += f' {ns.label:>{wids.label}}'
-        emit += f'{sep}{",".join(ns.mounts)}'
+        if ns.mounts:
+            emit += f'{sep}{",".join(ns.mounts)}'
+        else:
+            emit += f'{sep}{ns.marker}'
         return emit
 
     def merge_dev_infos(self, nss, prev_nss=None):
@@ -630,7 +708,7 @@ class DiskWipe:
             for part in self.partitions.values():
                 stop_if_idle(part)
             return None
-        
+
         if key == ord('l'):
             part = self.partitions[self.pick_name]
             self.set_state(part, 'Unlk' if part.state == 'Lock' else 'Lock')
@@ -764,7 +842,7 @@ class DiskWipe:
 
                     if partition.parent and self.partitions[partition.parent].state == 'Lock':
                         continue
-                    
+
                     if wanted(name) or partition.job:
                         partition.line = self.dev_info.part_str(partition)
                         self.win.add_body(partition.line)
