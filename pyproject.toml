@@ -47,7 +47,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dwipe"
-version = "1.0.2"
+version = "1.0.3"
 description = "A tool to wipe disks and partitions for Linux"
 authors = [
     { name = "Joe Defen", email = "joedef@google.com" }

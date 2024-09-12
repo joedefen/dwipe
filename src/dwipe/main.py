@@ -307,6 +307,7 @@ class DeviceInfo:
                     state = 'W' if pct >= 100 else 's'
                     dt = datetime.datetime.fromtimestamp(marker.unixtime)
                     entry.marker = f'{state} {pct}% {marker.mode} {dt.strftime('%Y/%m/%d %H:%M')}'
+                    entry.state = state
 
             return entry
 
@@ -333,8 +334,6 @@ class DeviceInfo:
                 if entry.mounts:
                     entry.state = 'Mnt'
                     parent.state = 'Mnt'
-                elif entry.marker:
-                    entry.state = entry.marker[0]
 
         if self.DB:
             print('\n\nDB: --->>> after parse_lsblk:')
@@ -532,18 +531,21 @@ class DeviceInfo:
             if new_ns:
                 if prev_ns.job:
                     new_ns.job = prev_ns.job
-                new_ns.state = new_ns.dflt = prev_ns.dflt
+                new_ns.dflt = prev_ns.dflt
+
                 if prev_ns.state == 'Lock':
-                    pass
-                if prev_ns.state not in ('Busy', 'Unlk'): # re-infer these
-                    new_ns.state = prev_ns.state
+                    new_ns.state = 'Lock'
+                elif new_ns.state not in ('s', 'W'):
+                    new_ns.state = new_ns.dflt
+                    if prev_ns.state not in ('s', 'W', 'Busy', 'Unlk'):
+                        new_ns.state = prev_ns.state # re-infer these
             elif prev_ns.job:
                 # unplugged device with job..
                 nss[name] = prev_ns # carry forward
                 prev_ns.job.do_abort = True
-        for name, prev_ns in nss.items():
-            if name not in prev_nss:
-                prev_ns.state = '^'
+        for name, new_ns in nss.items():
+            if name not in prev_nss and new_ns.state not in ('s', 'W'):
+                new_ns.state = '^'
         return nss
 
     def assemble_partitions(self, prev_nss=None):
