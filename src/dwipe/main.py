@@ -79,6 +79,7 @@ class WipeJob:
         self.total_written = 0
         self.wr_hists = []  # list of (mono, written)
         self.done = False
+        self.exception = None # in case of issues
 
     @staticmethod
     def start_job(device_path, total_size, opts):
@@ -185,38 +186,43 @@ class WipeJob:
         self.total_written = 0  # Track total bytes written
         is_random = self.opts.random
 
-        with open(self.device_path, 'wb') as device:
-            # for loop in range(10000000000):
-            offset = 0
-            chunk = memoryview(WipeJob.zero_buffer)
-            while True:
-                if self.do_abort:
-                    break
-                if is_random:
-                    offset = random.randint(0, WipeJob.BUFFER_SIZE - WipeJob.WRITE_SIZE)
-                    # Use memoryview to avoid copying the data
-                    chunk = memoryview(WipeJob.buffer)[offset:offset + WipeJob.WRITE_SIZE]
+        try:
+            with open(self.device_path, 'wb') as device:
+                # for loop in range(10000000000):
+                offset = 0
+                chunk = memoryview(WipeJob.zero_buffer)
+                while True:
+                    # foo = 1/0  # to force exception only
+                    if self.do_abort:
+                        break
+                    if is_random:
+                        offset = random.randint(0, WipeJob.BUFFER_SIZE - WipeJob.WRITE_SIZE)
+                        # Use memoryview to avoid copying the data
+                        chunk = memoryview(WipeJob.buffer)[offset:offset + WipeJob.WRITE_SIZE]
 
-                if self.opts.dry_run:
-                    bytes_written = self.total_size // 120
-                    time.sleep(0.25)
-                else:
-                    try:
-                        bytes_written = device.write(chunk)
-                    except Exception:
-                        bytes_written = 0
-                self.total_written += bytes_written
-                # Optional: Check for errors or incomplete writes
-                if bytes_written < WipeJob.WRITE_SIZE:
-                    break
-                if self.opts.dry_run and self.total_written >= self.total_size:
-                    break
-            # clear the beginning of device whether aborted or not
-            # if we have started writing + status in JSON
-            if not self.opts.dry_run and self.total_written > 0 and is_random:
-                device.seek(0)
-                # chunk = memoryview(WipeJob.zero_buffer)
-                bytes_written = device.write(self.prep_marker_buffer(is_random))
+                    if self.opts.dry_run:
+                        bytes_written = self.total_size // 120
+                        time.sleep(0.25)
+                    else:
+                        try:
+                            bytes_written = device.write(chunk)
+                        except Exception:
+                            bytes_written = 0
+                    self.total_written += bytes_written
+                    # Optional: Check for errors or incomplete writes
+                    if bytes_written < WipeJob.WRITE_SIZE:
+                        break
+                    if self.opts.dry_run and self.total_written >= self.total_size:
+                        break
+                # clear the beginning of device whether aborted or not
+                # if we have started writing + status in JSON
+                if not self.opts.dry_run and self.total_written > 0:
+                    device.seek(0)
+                    # chunk = memoryview(WipeJob.zero_buffer)
+                    bytes_written = device.write(self.prep_marker_buffer(is_random))
+        except Exception:
+            self.exception = traceback.format_exc()
+
         self.done = True
 
 class DeviceInfo:
@@ -755,6 +761,8 @@ class DiskWipe:
         line += ' Stop' if self.job_cnt > 0 else ''
         line += f' quit ?:help /{self.prev_filter}  Mode='
         line += f'{"Random" if self.opts.random else "Zeros"}'
+        if self.opts.dry_run:
+            line += ' DRY-RUN'
         # for action in self.actions:
             # line += f' {action[0]}:{action}'
         return line[1:]
@@ -834,9 +842,17 @@ class DiskWipe:
                             to='s' if partition.job.do_abort else 'W'
                             self.set_state(partition, to=to)
                             partition.dflt = to
-                            partition.job = None
                             partition.mounts = []
                             self.job_cnt -= 1
+                            if partition.job.exception:
+                                self.win.stop_curses()
+                                print('\n\n\n==========   ALERT  =========\n')
+                                print(f' FAILED: wipe {repr(partition.name)}')
+                                print(partition.job.exception)
+                                input('\n\n===== Press ENTER to continue ====> ')
+                                self.win._start_curses()
+
+                            partition.job = None
                     if partition.job:
                         elapsed, pct, rate, until = partition.job.get_status()
                         partition.state = pct
