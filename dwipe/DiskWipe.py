@@ -46,8 +46,10 @@ class DiskWipe:
         # Use provided persistent_state or create a new one
         self.persistent_state = persistent_state if persistent_state else PersistentState()
         # Set defaults for command-line options (only if not provided)
+        # The CLI exposes '--mode' (argparse dest 'mode'); map it onto the
+        # internal 'wipe_mode' so the flag is actually honored downstream.
         if not hasattr(self.opts, 'wipe_mode'):
-            self.opts.wipe_mode = '+V'
+            self.opts.wipe_mode = getattr(self.opts, 'mode', None) or '+V'
         if not hasattr(self.opts, 'passes'):
             self.opts.passes = 1
         if not hasattr(self.opts, 'verify_pct'):

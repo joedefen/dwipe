@@ -22,9 +22,24 @@ dependencies = [
     'console-window == 1.4.2',
 ]
 
+[project.optional-dependencies]
+test = [
+    'pytest >= 7.0',
+    'pytest-cov >= 4.0',
+]
+
 [project.urls]
 "Homepage" = "https://github.com/joedefen/dwipe"
 "Bug Tracker" = "https://github.com/joedefen/dwipe/issues"
 
 [project.scripts]
 dwipe = "dwipe.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["dwipe"]
+omit = ["tests/*"]

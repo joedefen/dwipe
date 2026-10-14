@@ -753,10 +753,8 @@ class DeviceInfo:
         for ns in nss.values():
             wids.state = max(wids.state, len(ns.state))
             wids.name = max(wids.name, len(ns.name) + 2)
-            if ns.label is None:
-                pass
-            wids.label = max(wids.label, len(ns.label))
-            wids.fstype = max(wids.fstype, len(ns.fstype))
+            wids.label = max(wids.label, len(ns.label or ''))
+            wids.fstype = max(wids.fstype, len(ns.fstype or ''))
         self.head_str = self.get_head_str()
 
     def get_head_str(self):

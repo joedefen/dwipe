@@ -7,12 +7,12 @@ Includes:
 - VerifyRandTask: Concrete class for verifying random data (statistical)
 """
 # pylint: disable=broad-exception-raised,broad-exception-caught
-import os
 import time
-import random
 import traceback
 from types import SimpleNamespace
 
+from . import device_io
+from . import verification
 from .WipeTask import WipeTask
 from .Utils import Utils
 
@@ -26,7 +26,7 @@ class VerifyTask(WipeTask):
     - Statistical analysis for random pattern verification
     - Progress tracking
 
-    Subclasses must set:
+    The heavy lifting lives in ``verification.verify_device``; subclasses set:
     - expected_pattern: "zeroed" or "random"
     - fast_fail: True for zero (fast memcmp), False for random (statistical)
     """
@@ -61,191 +61,24 @@ class VerifyTask(WipeTask):
                 self.done = True
                 return
 
-            # Fast-fail for zeros (VerifyZeroTask)
-            fast_fail_zeros = self.fast_fail and self.expected_pattern == "zeroed"
+            def on_progress(nbytes):
+                self.verify_progress += nbytes
+                self.total_written = self.verify_progress  # Update for get_status()
 
-            # For unmarked disks: track if ALL bytes are zero
-            all_zeros = (self.expected_pattern is None)
+            result, pattern, sections = verification.verify_device(
+                device_io,
+                self.device_path,
+                self.total_size,
+                self.verify_pct,
+                self.expected_pattern,
+                fast_fail=self.fast_fail,
+                is_aborted=lambda: self.do_abort,
+                on_progress=on_progress,
+            )
 
-            # Open with regular buffered I/O
-            fd = os.open(self.device_path, os.O_RDONLY)
-
-            try:
-                read_chunk_size = 64 * 1024  # 64KB chunks
-                SAMPLE_STEP = 23  # Sample every 23rd byte (~4% of data) - prime for even distribution
-
-                # Skip marker area
-                marker_skip = WipeTask.BUFFER_SIZE
-                usable_size = self.total_size - marker_skip
-
-                # Divide disk into 100 sections for sampling
-                num_sections = 100
-                section_size = usable_size // num_sections
-
-                # Pre-allocated zero pattern for fast comparison
-                ZERO_PATTERN_64K = b'\x00' * (64 * 1024)
-
-                # Track if any section failed
-                overall_failed = False
-                failure_reason = ""
-
-                for section_idx in range(num_sections):
-                    if self.do_abort or overall_failed:
-                        break
-
-                    # Reset analysis for THIS SECTION
-                    section_byte_counts = [0] * 256
-                    section_samples = 0
-                    section_found_nonzero = False
-
-                    # Calculate bytes to verify in this section
-                    bytes_in_section = min(section_size, usable_size - section_idx * section_size)
-                    bytes_to_verify = int(bytes_in_section * self.verify_pct / 100)
-
-                    if bytes_to_verify == 0:
-                        self.section_results.append((section_idx, "skipped", {}))
-                        continue
-
-                    # Random offset within section
-                    if bytes_to_verify < bytes_in_section:
-                        offset_in_section = random.randint(0, bytes_in_section - bytes_to_verify)
-                    else:
-                        offset_in_section = 0
-
-                    read_pos = marker_skip + (section_idx * section_size) + offset_in_section
-                    verified_in_section = 0
-
-                    # Seek to position in this section
-                    os.lseek(fd, read_pos, os.SEEK_SET)
-
-                    # Read and analyze THIS SECTION
-                    while verified_in_section < bytes_to_verify:
-                        if self.do_abort:
-                            break
-
-                        chunk_size = min(read_chunk_size, bytes_to_verify - verified_in_section)
-
-                        data = os.read(fd, chunk_size)
-                        if not data:
-                            break
-
-                        # --------------------------------------------------
-                        # SECTION ANALYSIS
-                        # --------------------------------------------------
-
-                        # FAST zero check for zeroed pattern
-                        if fast_fail_zeros:
-                            # Ultra-fast: compare against pre-allocated zero pattern
-                            if memoryview(data) != ZERO_PATTERN_64K[:len(data)]:
-                                failed_offset = read_pos + verified_in_section
-                                overall_failed = True
-                                failure_reason = f"non-zero at {Utils.human(failed_offset)}"
-                                break
-
-                        # FAST check for unmarked disks (looking for all zeros)
-                        if all_zeros and not section_found_nonzero:
-                            # Fast check: use bytes.count() which is C-optimized
-                            if data.count(0) != len(data):
-                                section_found_nonzero = True
-
-                        # RANDOM pattern analysis (always collect data for analysis)
-                        # Use memoryview for fast slicing
-                        mv = memoryview(data)
-                        data_len = len(data)
-
-                        # Sample every SAMPLE_STEP-th byte
-                        for i in range(0, data_len, SAMPLE_STEP):
-                            section_byte_counts[mv[i]] += 1
-                            section_samples += 1
-
-                        # --------------------------------------------------
-                        # END SECTION ANALYSIS
-                        # --------------------------------------------------
-
-                        verified_in_section += len(data)
-                        self.verify_progress += len(data)  # Track actual bytes read for progress
-                        self.total_written = self.verify_progress  # Update for get_status()
-
-                    # After reading section, analyze it
-                    if overall_failed:
-                        break
-
-                    # Determine section result
-                    if fast_fail_zeros:
-                        # Already passed zero check if we got here
-                        section_result = "zeroed"
-                        section_stats = {}
-
-                    elif all_zeros:
-                        if not section_found_nonzero:
-                            section_result = "zeroed"
-                            section_stats = {}
-                        else:
-                            # Need to check if it's random
-                            section_result, section_stats = self._analyze_section_randomness(
-                                section_byte_counts, section_samples
-                            )
-
-                    else:  # Expected random
-                        section_result, section_stats = self._analyze_section_randomness(
-                            section_byte_counts, section_samples
-                        )
-
-                    # Store section result
-                    self.section_results.append((section_idx, section_result, section_stats))
-
-                    # Check if section failed
-                    if (self.expected_pattern == "random" and section_result != "random") or \
-                       (self.expected_pattern == "zeroed" and section_result != "zeroed") or \
-                       (self.expected_pattern is None and section_result == "not-wiped"):
-
-                        overall_failed = True
-                        failure_reason = f"section {section_idx}: {section_result}"
-                        break
-
-            finally:
-                # Close file descriptor
-                if fd is not None:
-                    os.close(fd)
-
-            # Determine overall result
-            if overall_failed:
-                if self.expected_pattern == "zeroed":
-                    self.verify_result = f"not-wiped ({failure_reason})"
-                elif self.expected_pattern == "random":
-                    self.verify_result = f"not-wiped ({failure_reason})"
-                else:  # unmarked
-                    # Count section results
-                    zeroed_sections = sum(1 for _, result, _ in self.section_results if result == "zeroed")
-                    random_sections = sum(1 for _, result, _ in self.section_results if result == "random")
-                    total_checked = len([r for _, r, _ in self.section_results if r != "skipped"])
-
-                    if zeroed_sections == total_checked:
-                        self.verify_result = "zeroed"
-                        self.expected_pattern = "zeroed"
-                    elif random_sections == total_checked:
-                        self.verify_result = "random"
-                        self.expected_pattern = "random"
-                    else:
-                        self.verify_result = f"mixed ({failure_reason})"
-            else:
-                # All sections passed
-                if self.expected_pattern == "zeroed":
-                    self.verify_result = "zeroed"
-                elif self.expected_pattern == "random":
-                    self.verify_result = "random"
-                else:  # unmarked
-                    # Determine from section consensus
-                    zeroed_sections = sum(1 for _, result, _ in self.section_results if result == "zeroed")
-                    random_sections = sum(1 for _, result, _ in self.section_results if result == "random")
-
-                    if zeroed_sections > random_sections:
-                        self.verify_result = "zeroed"
-                        self.expected_pattern = "zeroed"
-                    else:
-                        self.verify_result = "random"
-                        self.expected_pattern = "random"
-
+            self.verify_result = result
+            self.expected_pattern = pattern
+            self.section_results = sections
             self.done = True
         except Exception:
             self.exception = traceback.format_exc()
@@ -253,59 +86,8 @@ class VerifyTask(WipeTask):
             self.done = True
 
     def _analyze_section_randomness(self, byte_counts, total_samples):
-        """Analyze if a section appears random"""
-        if total_samples < 100:
-            return "insufficient-data", {"samples": total_samples}
-
-        # Calculate statistics
-        max_count = max(byte_counts)
-        max_freq = max_count / total_samples
-
-        # Count unique bytes seen
-        unique_bytes = sum(1 for count in byte_counts if count > 0)
-
-        # Count completely unused bytes
-        unused_bytes = sum(1 for count in byte_counts if count == 0)
-
-        # Calculate expected frequency and variance
-        expected = total_samples / 256
-        if expected > 0:
-            # Coefficient of variation (measure of dispersion)
-            variance = sum((count - expected) ** 2 for count in byte_counts) / 256
-            std_dev = variance ** 0.5
-            cv = std_dev / expected
-        else:
-            cv = float('inf')
-
-        # Decision logic for "random"
-        # Good random data should:
-        # 1. Use most byte values (>200 unique)
-        # 2. No single byte dominates (<2% frequency)
-        # 3. Relatively even distribution (CV < 2.0)
-        # 4. Not too many zeros (if it's supposed to be random, not zeroed)
-
-        is_random = (unique_bytes > 200 and      # >78% of bytes used
-                     max_freq < 0.02 and         # No byte > 2%
-                     cv < 2.0 and               # Not too lumpy
-                     byte_counts[0] / total_samples < 0.5)  # Not mostly zeros
-
-        stats = {
-            "samples": total_samples,
-            "max_freq": max_freq,
-            "unique_bytes": unique_bytes,
-            "unused_bytes": unused_bytes,
-            "cv": cv,
-            "zero_freq": byte_counts[0] / total_samples if total_samples > 0 else 0
-        }
-
-        if is_random:
-            return "random", stats
-        else:
-            # Check if it's zeros
-            if byte_counts[0] / total_samples > 0.95:
-                return "zeroed", stats
-            else:
-                return "not-wiped", stats
+        """Analyze if a section appears random (delegates to verification)."""
+        return verification.analyze_section_randomness(byte_counts, total_samples)
 
     def get_status(self):
         """Get current progress status (thread-safe, called from main thread)

@@ -165,7 +165,10 @@ class SataTool:
         sec_block = security_match.group(0)
 
         # Better logic: Check if the keyword exists AND is not preceded by 'not'
-        secures.supported = "supported" in sec_block and "not supported" not in sec_block
+        # Match a bare "supported" token that is NOT preceded by "not".
+        # hdparm separates tokens with TABs (e.g. "not\tsupported"), so a
+        # space-based "not supported" substring check is unreliable.
+        secures.supported = bool(re.search(r'(?<!not)\s+supported', sec_block))
         secures.enabled = bool(re.search(r"(?<!not)\s+enabled", sec_block))
         secures.locked = bool(re.search(r"(?<!not)\s+locked", sec_block))
         secures.frozen = bool(re.search(r"(?<!not)\s+frozen", sec_block))

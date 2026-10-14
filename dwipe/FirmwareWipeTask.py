@@ -11,12 +11,13 @@ Includes:
 # pylint: disable=too-many-positional-arguments,consider-using-with
 # pylint: disable=too-many-return-statements
 import os
-import json
 import time
 import random
 import subprocess
 import traceback
 
+from . import device_io
+from . import markers
 from .WipeTask import WipeTask
 from .Utils import Utils
 from .SataTool import SataTool
@@ -110,27 +111,16 @@ class FirmwareWipeTask(WipeTask):
                 time.sleep(0.5)  # Let kernel settle
 
                 # Prepare marker data
-                data = {
-                    "unixtime": int(time.time()),
-                    "scrubbed_bytes": self.total_size,
-                    "size_bytes": self.total_size,
-                    "passes": 1,
-                    "mode": self.wipe_name,  # e.g., 'Crypto', 'Enhanced'
-                }
-                json_data = json.dumps(data).encode('utf-8')
-
-                # Build marker buffer (16KB)
-                buffer = bytearray(WipeTask.MARKER_SIZE)
-                buffer[:WipeTask.STATE_OFFSET] = b'\x00' * WipeTask.STATE_OFFSET
-                buffer[WipeTask.STATE_OFFSET:WipeTask.STATE_OFFSET + len(json_data)] = json_data
-                remaining = WipeTask.MARKER_SIZE - (WipeTask.STATE_OFFSET + len(json_data))
-                buffer[WipeTask.STATE_OFFSET + len(json_data):] = b'\x00' * remaining
+                buffer = markers.build_marker_buffer(
+                    scrubbed_bytes=self.total_size,
+                    size_bytes=self.total_size,
+                    passes=1,
+                    is_random=False,
+                    mode_override=self.wipe_name,  # e.g., 'Crypto', 'Enhanced'
+                )
 
                 # Write marker to beginning of device
-                with open(self.device_path, 'wb') as f:
-                    f.write(buffer)
-                    f.flush()
-                    os.fsync(f.fileno())
+                markers.write_marker(self.device_path, buffer, device_io, mode='wb')
 
                 # Success
                 return
@@ -633,7 +623,7 @@ class FirmwarePreVerifyTask(WipeTask):
                 self.original_blocks.append(block)
 
             # Phase 3: Write blocks to device
-            with open(self.device_path, 'r+b') as device:
+            with device_io.open_buffered(self.device_path, 'r+b') as device:
                 for i, offset in enumerate(self.test_locations):
                     if self.do_abort:
                         break
@@ -645,7 +635,7 @@ class FirmwarePreVerifyTask(WipeTask):
                     # Total written includes both zero wipe and test blocks
                     self.total_written = self.zero_wipe_bytes + (self.blocks_written * self.BLOCK_SIZE)
 
-                os.fsync(device.fileno())
+                device_io.sync(device)
 
         except Exception:
             self.exception = traceback.format_exc()
@@ -662,11 +652,11 @@ class FirmwarePreVerifyTask(WipeTask):
         """
         try:
             # Open device with O_DIRECT for unbuffered I/O
-            fd = os.open(self.device_path, os.O_WRONLY | os.O_DIRECT)
+            fd = device_io.open_direct(self.device_path, write=True)
 
             try:
                 # Seek to start of device
-                os.lseek(fd, 0, os.SEEK_SET)
+                device_io.lseek(fd, 0, os.SEEK_SET)
 
                 bytes_to_write = self.ZERO_WIPE_SIZE
                 bytes_written_total = 0
@@ -685,7 +675,7 @@ class FirmwarePreVerifyTask(WipeTask):
 
                     try:
                         # Write with O_DIRECT (bypasses page cache)
-                        bytes_written = os.write(fd, chunk)
+                        bytes_written = device_io.write(fd, chunk)
                     except Exception as e:
                         self.exception = f"Zero wipe failed: {str(e)}"
                         self.do_abort = True
@@ -702,7 +692,7 @@ class FirmwarePreVerifyTask(WipeTask):
             finally:
                 # Close device file descriptor
                 if fd is not None:
-                    os.close(fd)
+                    device_io.close(fd)
 
         except Exception as e:
             self.exception = f"Zero wipe partition area failed: {str(e)}"
@@ -756,30 +746,11 @@ class FirmwarePostVerifyTask(WipeTask):
             if not marker:
                 return  # No marker to update
 
-            # Prepare updated marker data
-            data = {
-                "unixtime": marker.unixtime,
-                "scrubbed_bytes": marker.scrubbed_bytes,
-                "size_bytes": marker.size_bytes,
-                "passes": marker.passes,
-                "mode": marker.mode,
-                "verify_status": verify_status,  # "pass" or "fail"
-            }
-
-            json_data = json.dumps(data).encode('utf-8')
-
-            # Build marker buffer (16KB)
-            buffer = bytearray(WipeTask.MARKER_SIZE)
-            buffer[:WipeTask.STATE_OFFSET] = b'\x00' * WipeTask.STATE_OFFSET
-            buffer[WipeTask.STATE_OFFSET:WipeTask.STATE_OFFSET + len(json_data)] = json_data
-            remaining = WipeTask.MARKER_SIZE - (WipeTask.STATE_OFFSET + len(json_data))
-            buffer[WipeTask.STATE_OFFSET + len(json_data):] = b'\x00' * remaining
+            # Prepare updated marker data (preserve existing fields)
+            buffer = markers.build_marker_from_existing(marker, verify_status=verify_status)
 
             # Write updated marker to beginning of device
-            with open(self.device_path, 'wb') as f:
-                f.write(buffer)
-                f.flush()
-                os.fsync(f.fileno())
+            markers.write_marker(self.device_path, buffer, device_io, mode='wb')
 
         except Exception:
             # Don't fail the job if marker update fails
@@ -807,7 +778,7 @@ class FirmwarePostVerifyTask(WipeTask):
             block_size = FirmwarePreVerifyTask.BLOCK_SIZE
 
             # Read current blocks from device
-            with open(self.device_path, 'rb') as device:
+            with device_io.open_buffered(self.device_path, 'rb') as device:
                 for i, offset in enumerate(test_locations):
                     if self.do_abort:
                         break

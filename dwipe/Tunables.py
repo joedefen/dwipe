@@ -22,12 +22,12 @@ class Tunables:
         else:
             self.config.read(self.path)
 
-    @staticmethod
-    def get_singleton(self):
+    @classmethod
+    def get_singleton(cls):
         """ Get the singleton Tunable object """
-        if not Tunables.get_singleton:
-            Tunables.singleton = Tunables()
-        return Tunables.singleton
+        if cls.singleton is None:
+            cls.singleton = cls()
+        return cls.singleton
 
     def _create_default(self):
         """Generates a default .ini file with recommended 'turkey' hardware timings."""

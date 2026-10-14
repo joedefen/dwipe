@@ -8,12 +8,13 @@ Includes:
 """
 # pylint: disable=broad-exception-raised,broad-exception-caught
 import os
-import json
 import time
 import subprocess
 import traceback
 from types import SimpleNamespace
 
+from . import device_io
+from . import markers
 from .WipeTask import WipeTask
 from .Utils import Utils
 
@@ -96,7 +97,7 @@ class WriteTask(WipeTask):
             self._setup_ionice()
 
             # Open device with O_DIRECT for unbuffered I/O
-            fd = os.open(self.device_path, os.O_WRONLY | os.O_DIRECT)
+            fd = device_io.open_direct(self.device_path, write=True)
 
             try:
                 # Start from resume offset if resuming
@@ -108,7 +109,7 @@ class WriteTask(WipeTask):
                     offset_in_pass = WipeTask.MARKER_SIZE
 
                 # Seek to current position (O_DIRECT requires block-aligned seeks)
-                os.lseek(fd, offset_in_pass, os.SEEK_SET)
+                device_io.lseek(fd, offset_in_pass, os.SEEK_SET)
 
                 # Write until end of pass
                 bytes_to_write = self.total_size - offset_in_pass
@@ -171,7 +172,7 @@ class WriteTask(WipeTask):
             finally:
                 # Close device file descriptor
                 if fd is not None:
-                    os.close(fd)
+                    device_io.close(fd)
 
             self.done = True
         except Exception:
@@ -194,7 +195,7 @@ class WriteTask(WipeTask):
         consecutive_errors = 0
         while True:  # Keep trying until success, skip, or abort
             try:
-                bytes_written = os.write(fd, chunk)
+                bytes_written = device_io.write(fd, chunk)
                 self.reopen_count = 0
                 return bytes_written, fd  # success
 
@@ -214,21 +215,21 @@ class WriteTask(WipeTask):
                     try:
                         current_pos = self.total_written
                         # Open new fd first
-                        new_fd = os.open(self.device_path, os.O_WRONLY | os.O_DIRECT)
+                        new_fd = device_io.open_direct(self.device_path, write=True)
                         try:
                             # Seek to correct position on new fd
-                            os.lseek(new_fd, current_pos, os.SEEK_SET)
+                            device_io.lseek(new_fd, current_pos, os.SEEK_SET)
                             # Only close old fd after new one is ready
                             old_fd = fd
                             fd = new_fd
                             try:
-                                os.close(old_fd)
+                                device_io.close(old_fd)
                             except Exception:
                                 pass  # Old fd close failed, but new fd is good
                             self.reopen_count += 1
                         except Exception:
                             # New fd setup failed, close it and keep using old fd
-                            os.close(new_fd)
+                            device_io.close(new_fd)
                             raise
                     except Exception:
                         # Reopen failed - count as another error and retry with old fd
@@ -251,7 +252,7 @@ class WriteTask(WipeTask):
         try:
             # Determine if this is a random or zero write
             is_random = isinstance(self, WriteRandTask)
-            with open(self.device_path, 'r+b') as marker_file:
+            with device_io.open_buffered(self.device_path, 'r+b') as marker_file:
                 marker_file.seek(0)
                 marker_file.write(self._prep_marker_buffer(is_random))
             self.last_marker_update_mono = now_mono
@@ -268,20 +269,12 @@ class WriteTask(WipeTask):
         Returns:
             bytearray: 16KB marker buffer with JSON status
         """
-        data = {
-            "unixtime": int(time.time()),
-            "scrubbed_bytes": self.total_written,
-            "size_bytes": self.total_size,
-            "passes": 1,  # Single pass per WriteTask
-            "mode": 'Rand' if is_random else 'Zero'
-        }
-        json_data = json.dumps(data).encode('utf-8')
-        buffer = bytearray(WipeTask.MARKER_SIZE)  # Only 16KB, not 1MB
-        buffer[:WipeTask.STATE_OFFSET] = b'\x00' * WipeTask.STATE_OFFSET
-        buffer[WipeTask.STATE_OFFSET:WipeTask.STATE_OFFSET + len(json_data)] = json_data
-        remaining_size = WipeTask.MARKER_SIZE - (WipeTask.STATE_OFFSET + len(json_data))
-        buffer[WipeTask.STATE_OFFSET + len(json_data):] = b'\x00' * remaining_size
-        return buffer
+        return markers.build_marker_buffer(
+            scrubbed_bytes=self.total_written,
+            size_bytes=self.total_size,
+            passes=1,  # Single pass per WriteTask
+            is_random=is_random,
+        )
 
     def _check_for_stall(self, current_monotonic):
         """Check for stall (no progress) - called frequently"""

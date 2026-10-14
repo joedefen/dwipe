@@ -6,4 +6,3 @@ venv.zd/
 *.pyc
 *egg-info*
 dist/
-.github/

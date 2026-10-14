@@ -5,7 +5,6 @@ Orchestrates task sequences (write and verify operations).
 """
 # pylint: disable=broad-exception-raised,broad-exception-caught
 import os
-import json
 import time
 import threading
 import random
@@ -14,6 +13,9 @@ import subprocess
 import mmap
 from types import SimpleNamespace
 
+from . import device_io
+from . import markers
+from . import verification
 from .Utils import Utils
 from .WipeTask import WipeTask
 from .WriteTask import WriteTask, WriteZeroTask, WriteRandTask
@@ -306,12 +308,12 @@ class WipeJob:
 
                 try:
                     abort_reason = self._extract_abort_reason()
-                    with open(self.device_path, 'r+b') as marker_file:
+                    with device_io.open_buffered(self.device_path, 'r+b') as marker_file:
                         marker_file.seek(0)
                         marker_file.write(self.prep_marker_buffer(is_random, verify_status=None,
                                                                    abort_reason=abort_reason))
                         marker_file.flush()
-                        os.fsync(marker_file.fileno())
+                        device_io.sync(marker_file)
                 except Exception:
                     pass  # Don't fail the stop on marker write error
 
@@ -351,24 +353,40 @@ class WipeJob:
             return pass_number % 2 == 0
 
     @staticmethod
-    def start_job(device_path, total_size, opts):
-        """Start a wipe job in a background thread
+    def plan_job(device_path, total_size, opts, existing_marker=None, io=None):
+        """Compute resume offset/mode and build the task sequence (pure).
 
-        If an existing marker with stopped state is found, resumes from that offset.
-        Uses current passes setting to determine target bytes (may differ from original).
+        This is the planning half of ``start_job``, split out so the resume
+        logic can be unit-tested without touching a device or starting a thread.
 
         Smart resume logic for multi-pass:
         - If resuming in the final pass, checks pattern on disk
         - If pattern matches expected for final pass, resumes from current position
         - If pattern doesn't match, restarts final pass from beginning
         This prevents mixed patterns (e.g., random then zeros) in the final result.
+
+        Args:
+            device_path: Path to device (e.g., '/dev/sda1').
+            total_size: Total size in bytes.
+            opts: Options namespace.
+            existing_marker: parsed marker (or None). If None, the marker is
+                read from the device using ``io``.
+            io: optional device I/O implementation used to read the marker
+                (defaults to the ``device_io`` module).
+
+        Returns:
+            tuple: (tasks, resume_from, resume_mode)
         """
+        if io is None:
+            io = device_io
+
         resume_from = 0
         resume_mode = None
 
         # Check for existing marker to resume from
-        device_name = device_path.replace('/dev/', '')
-        existing_marker = WipeJob.read_marker_buffer(device_name)
+        if existing_marker is None:
+            device_name = device_path.replace('/dev/', '')
+            existing_marker = markers.read_marker(device_name, io)
         if existing_marker and existing_marker.scrubbed_bytes > 0:
             scrubbed = existing_marker.scrubbed_bytes
             resume_mode = existing_marker.mode  # Use original mode ('Rand' or 'Zero')
@@ -401,10 +419,8 @@ class WipeJob:
 
                 if current_pass >= last_pass_num:
                     # Resuming in final pass - check pattern on disk matches expected
-                    # Create temporary job to use get_pass_pattern method
-                    temp_job = WipeJob(device_path, total_size, opts)
-                    temp_job.passes = passes
-                    expected_is_random = temp_job.get_pass_pattern(last_pass_num, resume_mode)
+                    expected_is_random = WipeJob._get_pass_pattern_static(
+                        last_pass_num, passes, resume_mode)
 
                     # Detect actual pattern on disk
                     actual_is_random = WipeJob.detect_pattern_on_disk(device_path)
@@ -467,6 +483,24 @@ class WipeJob:
             else:
                 task = VerifyZeroTask(device_path, total_size, opts, verify_pct=verify_pct)
             tasks.append(task)
+
+        return tasks, resume_from, resume_mode
+
+    @staticmethod
+    def start_job(device_path, total_size, opts):
+        """Start a wipe job in a background thread.
+
+        If an existing marker with stopped state is found, resumes from that
+        offset. Uses current passes setting to determine target bytes (may
+        differ from original).
+
+        Reads any existing marker, plans the resume/task sequence via
+        ``plan_job``, then runs the tasks on a worker thread.
+        """
+        device_name = device_path.replace('/dev/', '')
+        existing_marker = WipeJob.read_marker_buffer(device_name)
+        tasks, resume_from, resume_mode = WipeJob.plan_job(
+            device_path, total_size, opts, existing_marker)
 
         # Create WipeJob with task sequence
         job = WipeJob(device_path=device_path, total_size=total_size, opts=opts, tasks=tasks)
@@ -915,23 +949,14 @@ class WipeJob:
             verify_status: str, "pass", "fail", or None (not verified)
             abort_reason: str, short error description or None (no error)
         """
-        data = {"unixtime": int(time.time()),
-                "scrubbed_bytes": self.total_written,
-                "size_bytes": self.total_size,
-                "passes": self.passes,
-                "mode": 'Rand' if is_random else 'Zero'
-                }
-        if verify_status is not None:
-            data["verify_status"] = verify_status
-        if abort_reason is not None:
-            data["abort_reason"] = abort_reason
-        json_data = json.dumps(data).encode('utf-8')
-        buffer = bytearray(WipeTask.MARKER_SIZE)  # Only 16KB, not 1MB
-        buffer[:WipeTask.STATE_OFFSET] = b'\x00' * WipeTask.STATE_OFFSET
-        buffer[WipeTask.STATE_OFFSET:WipeTask.STATE_OFFSET + len(json_data)] = json_data
-        remaining_size = WipeTask.MARKER_SIZE - (WipeTask.STATE_OFFSET + len(json_data))
-        buffer[WipeTask.STATE_OFFSET + len(json_data):] = b'\x00' * remaining_size
-        return buffer
+        return markers.build_marker_buffer(
+            scrubbed_bytes=self.total_written,
+            size_bytes=self.total_size,
+            passes=self.passes,
+            is_random=is_random,
+            verify_status=verify_status,
+            abort_reason=abort_reason,
+        )
 
     def get_pass_pattern(self, pass_number, desired_mode):
         """Determine what pattern to write for a given pass
@@ -987,11 +1012,11 @@ class WipeJob:
         # Marker writes use separate file handle (buffered I/O, not O_DIRECT)
         # because marker buffer is not aligned
         try:
-            with open(self.device_path, 'r+b') as marker_file:
+            with device_io.open_buffered(self.device_path, 'r+b') as marker_file:
                 marker_file.seek(0)
                 marker_file.write(self.prep_marker_buffer(is_random))
                 marker_file.flush()
-                os.fsync(marker_file.fileno())
+                device_io.sync(marker_file)
             self.last_marker_update_mono = now_mono
         except Exception:
             # If marker update fails, just continue - we'll try again in 30s
@@ -1012,7 +1037,7 @@ class WipeJob:
             bool: True if random pattern detected, False if zeros detected
         """
         try:
-            with open(device_path, 'rb') as device:
+            with device_io.open_buffered(device_path, 'rb') as device:
                 # Skip past the marker area (first 16KB)
                 device.seek(WipeTask.WRITE_SIZE)
                 data = device.read(sample_size)
@@ -1055,43 +1080,9 @@ class WipeJob:
             pass
 
     @staticmethod
-    def read_marker_buffer(device_name):
-        """Open the device and read the first 16 KB"""
-        try:
-            with open(f'/dev/{device_name}', 'rb') as device:
-                device.seek(0)
-                buffer = device.read(WipeTask.MARKER_SIZE)
-        except Exception:
-            return None  # cannot find info
-
-        if buffer[:WipeTask.STATE_OFFSET] != b'\x00' * (WipeTask.STATE_OFFSET):
-            return None  # First 15 KB are not zeros
-
-        # Extract JSON data from the next 1 KB Strip trailing zeros
-        json_data_bytes = buffer[WipeTask.STATE_OFFSET:WipeTask.MARKER_SIZE].rstrip(b'\x00')
-
-        if not json_data_bytes:
-            return None  # No JSON data found
-
-        # Deserialize the JSON data
-        try:
-            data = json.loads(json_data_bytes.decode('utf-8'))
-        except (json.JSONDecodeError, Exception):
-            return None  # Invalid JSON data!
-
-        rv = {}
-        for key, value in data.items():
-            if key in ('unixtime', 'scrubbed_bytes', 'size_bytes', 'passes') and isinstance(value, int):
-                rv[key] = value
-            elif key in ('mode', 'verify_status', 'abort_reason') and isinstance(value, str):
-                rv[key] = value
-            else:
-                return None  # bogus data
-        # Old markers: 4 fields (no passes, no verify_status, no abort_reason)
-        # New markers: 5 fields minimum (with passes), 6 with verify_status, 7 with abort_reason
-        if len(rv) < 4 or len(rv) > 7:
-            return None  # bogus data
-        return SimpleNamespace(**rv)
+    def read_marker_buffer(device_name, io=None):
+        """Open the device and read the first 16 KB (delegates to markers)."""
+        return markers.read_marker(device_name, io)
 
     def write_partition(self):
         """Writes random chunks to a device and updates the progress status.
@@ -1121,7 +1112,7 @@ class WipeJob:
 
             # Open device with O_DIRECT for unbuffered I/O (bypasses page cache)
             # O_DIRECT gives maximum performance with zero dirty pages
-            fd = os.open(self.device_path, os.O_WRONLY | os.O_DIRECT)
+            fd = device_io.open_direct(self.device_path, write=True)
 
             try:
                 # Continue writing until we reach target_bytes
@@ -1139,7 +1130,7 @@ class WipeJob:
                     is_random_pass = self.get_pass_pattern(self.current_pass, desired_mode)
 
                     # Seek to current position (O_DIRECT requires block-aligned seeks)
-                    os.lseek(fd, offset_in_pass, os.SEEK_SET)
+                    device_io.lseek(fd, offset_in_pass, os.SEEK_SET)
 
                     # Write until end of current pass or target_bytes, whichever comes first
                     pass_remaining = self.total_size - offset_in_pass
@@ -1213,7 +1204,7 @@ class WipeJob:
             finally:
                 # Close device file descriptor
                 if fd is not None:
-                    os.close(fd)
+                    device_io.close(fd)
 
             # Write final marker buffer at beginning after ALL passes complete
             # Skip marker write on abort to avoid blocking on problematic devices
@@ -1221,11 +1212,11 @@ class WipeJob:
             if self.total_written > 0 and not self.do_abort:
                 try:
                     final_is_random = (desired_mode == 'Rand')
-                    with open(self.device_path, 'r+b') as marker_file:
+                    with device_io.open_buffered(self.device_path, 'r+b') as marker_file:
                         marker_file.seek(0)
                         marker_file.write(self.prep_marker_buffer(final_is_random))
                         marker_file.flush()
-                        os.fsync(marker_file.fileno())
+                        device_io.sync(marker_file)
                 except Exception:
                     # Log marker write failure but don't fail the whole job
                     self.exception = f"Marker write failed: {traceback.format_exc()}"
@@ -1265,7 +1256,7 @@ class WipeJob:
         consecutive_errors = 0
         while True:  # Keep trying until success, skip, or abort
             try:
-                bytes_written = os.write(fd, chunk)
+                bytes_written = device_io.write(fd, chunk)
                 self.reopen_count = 0
                 return bytes_written, fd # success
 
@@ -1285,21 +1276,21 @@ class WipeJob:
                     try:
                         current_pos = self.total_written
                         # Open new fd first
-                        new_fd = os.open(self.device_path, os.O_WRONLY | os.O_DIRECT)
+                        new_fd = device_io.open_direct(self.device_path, write=True)
                         try:
                             # Seek to correct position on new fd
-                            os.lseek(new_fd, current_pos, os.SEEK_SET)
+                            device_io.lseek(new_fd, current_pos, os.SEEK_SET)
                             # Only close old fd after new one is ready
                             old_fd = fd
                             fd = new_fd
                             try:
-                                os.close(old_fd)
+                                device_io.close(old_fd)
                             except Exception:
                                 pass  # Old fd close failed, but new fd is good
                             self.reopen_count += 1
                         except Exception:
                             # New fd setup failed, close it and keep using old fd
-                            os.close(new_fd)
+                            device_io.close(new_fd)
                             raise
                     except Exception:
                         # Reopen failed - count as another error and retry with old fd
@@ -1308,7 +1299,11 @@ class WipeJob:
                 # Retry the write (continue loop)
 
     def verify_partition(self, verify_pct):
-        """Verify partition with section-by-section analysis"""
+        """Verify partition via the shared verification helper.
+
+        Delegates the sampling/analysis work to ``verification.verify_device``
+        so the algorithm lives in exactly one place.
+        """
         # Initialize verify state
         if not self.verify_phase:
             self.verify_pct = verify_pct
@@ -1318,199 +1313,22 @@ class WipeJob:
             self.wr_hists.append(SimpleNamespace(mono=self.verify_start_mono, written=0))
             self.verify_phase = True
 
-        if verify_pct == 0:
-            self.verify_result = "skipped"
-            return
+        def on_progress(nbytes):
+            self.verify_progress += nbytes  # Track actual bytes read for progress
 
-        # Fast-fail for zeros
-        fast_fail_zeros = (self.expected_pattern == "zeroed")
-
-        # For unmarked disks: track if ALL bytes are zero
-        all_zeros = (self.expected_pattern is None)
-
-        # Track section results for debugging
-        self.section_results = []  # Store (section_idx, result, stats)
-
-        try:
-            # Open with regular buffered I/O
-            fd = os.open(self.device_path, os.O_RDONLY)
-
-            read_chunk_size = 64 * 1024  # 64KB chunks
-            SAMPLE_STEP = 23  # Sample every 23rd byte (~4% of data) - prime for even distribution
-
-            # Skip marker area
-            marker_skip = WipeTask.BUFFER_SIZE
-            usable_size = self.total_size - marker_skip
-
-            # Divide disk into 100 sections for sampling
-            num_sections = 100
-            section_size = usable_size // num_sections
-
-            # Pre-allocated zero pattern for fast comparison
-            ZERO_PATTERN_64K = b'\x00' * (64 * 1024)
-
-            # Track if any section failed
-            overall_failed = False
-            failure_reason = ""
-
-            for section_idx in range(num_sections):
-                if self.do_abort or overall_failed:
-                    break
-
-                # Reset analysis for THIS SECTION
-                section_byte_counts = [0] * 256
-                section_samples = 0
-                section_found_nonzero = False
-
-                # Calculate bytes to verify in this section
-                bytes_in_section = min(section_size, usable_size - section_idx * section_size)
-                bytes_to_verify = int(bytes_in_section * verify_pct / 100)
-
-                if bytes_to_verify == 0:
-                    self.section_results.append((section_idx, "skipped", {}))
-                    continue
-
-                # Random offset within section
-                if bytes_to_verify < bytes_in_section:
-                    offset_in_section = random.randint(0, bytes_in_section - bytes_to_verify)
-                else:
-                    offset_in_section = 0
-
-                read_pos = marker_skip + (section_idx * section_size) + offset_in_section
-                verified_in_section = 0
-
-                # Seek to position in this section
-                os.lseek(fd, read_pos, os.SEEK_SET)
-
-                # Read and analyze THIS SECTION
-                while verified_in_section < bytes_to_verify:
-                    if self.do_abort:
-                        break
-
-                    chunk_size = min(read_chunk_size, bytes_to_verify - verified_in_section)
-
-                    data = os.read(fd, chunk_size)
-                    if not data:
-                        break
-
-                    # --------------------------------------------------
-                    # SECTION ANALYSIS
-                    # --------------------------------------------------
-
-                    # FAST zero check for zeroed pattern
-                    if fast_fail_zeros:
-                        # Ultra-fast: compare against pre-allocated zero pattern
-                        if memoryview(data) != ZERO_PATTERN_64K[:len(data)]:
-                            failed_offset = read_pos + verified_in_section
-                            overall_failed = True
-                            failure_reason = f"non-zero at {Utils.human(failed_offset)}"
-                            break
-
-                    # FAST check for unmarked disks (looking for all zeros)
-                    if all_zeros and not section_found_nonzero:
-                        # Fast check: use bytes.count() which is C-optimized
-                        if data.count(0) != len(data):
-                            section_found_nonzero = True
-
-                    # RANDOM pattern analysis (always collect data for analysis)
-                    # Use memoryview for fast slicing
-                    mv = memoryview(data)
-                    data_len = len(data)
-
-                    # Sample every SAMPLE_STEP-th byte
-                    for i in range(0, data_len, SAMPLE_STEP):
-                        section_byte_counts[mv[i]] += 1
-                        section_samples += 1
-
-                    # --------------------------------------------------
-                    # END SECTION ANALYSIS
-                    # --------------------------------------------------
-
-                    verified_in_section += len(data)
-                    self.verify_progress += len(data)  # Track actual bytes read for progress
-
-                # After reading section, analyze it
-                if overall_failed:
-                    break
-
-                # Determine section result
-                if fast_fail_zeros:
-                    # Already passed zero check if we got here
-                    section_result = "zeroed"
-                    section_stats = {}
-
-                elif all_zeros:
-                    if not section_found_nonzero:
-                        section_result = "zeroed"
-                        section_stats = {}
-                    else:
-                        # Need to check if it's random
-                        section_result, section_stats = self._analyze_section_randomness(
-                            section_byte_counts, section_samples
-                        )
-
-                else:  # Expected random
-                    section_result, section_stats = self._analyze_section_randomness(
-                        section_byte_counts, section_samples
-                    )
-
-                # Store section result
-                self.section_results.append((section_idx, section_result, section_stats))
-
-                # Check if section failed
-                if (self.expected_pattern == "random" and section_result != "random") or \
-                   (self.expected_pattern == "zeroed" and section_result != "zeroed") or \
-                   (self.expected_pattern is None and section_result == "not-wiped"):
-
-                    overall_failed = True
-                    failure_reason = f"section {section_idx}: {section_result}"
-                    break
-
-            # Close file descriptor
-            if fd is not None:
-                os.close(fd)
-
-            # Determine overall result
-            if overall_failed:
-                if self.expected_pattern == "zeroed":
-                    self.verify_result = f"not-wiped ({failure_reason})"
-                elif self.expected_pattern == "random":
-                    self.verify_result = f"not-wiped ({failure_reason})"
-                else:  # unmarked
-                    # Count section results
-                    zeroed_sections = sum(1 for _, result, _ in self.section_results if result == "zeroed")
-                    random_sections = sum(1 for _, result, _ in self.section_results if result == "random")
-                    total_checked = len([r for _, r, _ in self.section_results if r != "skipped"])
-
-                    if zeroed_sections == total_checked:
-                        self.verify_result = "zeroed"
-                        self.expected_pattern = "zeroed"
-                    elif random_sections == total_checked:
-                        self.verify_result = "random"
-                        self.expected_pattern = "random"
-                    else:
-                        self.verify_result = f"mixed ({failure_reason})"
-            else:
-                # All sections passed
-                if self.expected_pattern == "zeroed":
-                    self.verify_result = "zeroed"
-                elif self.expected_pattern == "random":
-                    self.verify_result = "random"
-                else:  # unmarked
-                    # Determine from section consensus
-                    zeroed_sections = sum(1 for _, result, _ in self.section_results if result == "zeroed")
-                    random_sections = sum(1 for _, result, _ in self.section_results if result == "random")
-
-                    if zeroed_sections > random_sections:
-                        self.verify_result = "zeroed"
-                        self.expected_pattern = "zeroed"
-                    else:
-                        self.verify_result = "random"
-                        self.expected_pattern = "random"
-
-        except Exception:
-            self.exception = traceback.format_exc()
-            self.verify_result = "error"
+        result, pattern, sections = verification.verify_device(
+            device_io,
+            self.device_path,
+            self.total_size,
+            verify_pct,
+            self.expected_pattern,
+            fast_fail=(self.expected_pattern == "zeroed"),
+            is_aborted=lambda: self.do_abort,
+            on_progress=on_progress,
+        )
+        self.verify_result = result
+        self.expected_pattern = pattern
+        self.section_results = sections
 
 
 
@@ -1518,59 +1336,8 @@ class WipeJob:
 
 
     def _analyze_section_randomness(self, byte_counts, total_samples):
-        """Analyze if a section appears random"""
-        if total_samples < 100:
-            return "insufficient-data", {"samples": total_samples}
-
-        # Calculate statistics
-        max_count = max(byte_counts)
-        max_freq = max_count / total_samples
-
-        # Count unique bytes seen
-        unique_bytes = sum(1 for count in byte_counts if count > 0)
-
-        # Count completely unused bytes
-        unused_bytes = sum(1 for count in byte_counts if count == 0)
-
-        # Calculate expected frequency and variance
-        expected = total_samples / 256
-        if expected > 0:
-            # Coefficient of variation (measure of dispersion)
-            variance = sum((count - expected) ** 2 for count in byte_counts) / 256
-            std_dev = variance ** 0.5
-            cv = std_dev / expected
-        else:
-            cv = float('inf')
-
-        # Decision logic for "random"
-        # Good random data should:
-        # 1. Use most byte values (>200 unique)
-        # 2. No single byte dominates (<2% frequency)
-        # 3. Relatively even distribution (CV < 2.0)
-        # 4. Not too many zeros (if it's supposed to be random, not zeroed)
-
-        is_random = (unique_bytes > 200 and      # >78% of bytes used
-                     max_freq < 0.02 and         # No byte > 2%
-                     cv < 2.0 and               # Not too lumpy
-                     byte_counts[0] / total_samples < 0.5)  # Not mostly zeros
-
-        stats = {
-            "samples": total_samples,
-            "max_freq": max_freq,
-            "unique_bytes": unique_bytes,
-            "unused_bytes": unused_bytes,
-            "cv": cv,
-            "zero_freq": byte_counts[0] / total_samples if total_samples > 0 else 0
-        }
-
-        if is_random:
-            return "random", stats
-        else:
-            # Check if it's zeros
-            if byte_counts[0] / total_samples > 0.95:
-                return "zeroed", stats
-            else:
-                return "not-wiped", stats
+        """Analyze if a section appears random (delegates to verification)."""
+        return verification.analyze_section_randomness(byte_counts, total_samples)
 
 
 
@@ -1598,11 +1365,11 @@ class WipeJob:
                 is_random = isinstance(last_write_task, WriteRandTask)
 
             # Write marker WITHOUT verify_status (write completion only)
-            with open(self.device_path, 'r+b') as marker_file:
+            with device_io.open_buffered(self.device_path, 'r+b') as marker_file:
                 marker_file.seek(0)
                 marker_file.write(self.prep_marker_buffer(is_random, verify_status=None))
                 marker_file.flush()
-                os.fsync(marker_file.fileno())
+                device_io.sync(marker_file)
 
         except Exception:
             # Log error but don't fail the job - marker write is not critical
@@ -1667,13 +1434,13 @@ class WipeJob:
                 return
 
             # Write marker with verification status
-            with open(self.device_path, 'r+b') as device:
+            with device_io.open_buffered(self.device_path, 'r+b') as device:
                 device.seek(0)
                 marker_buffer = self.prep_marker_buffer(is_random,
                                                         verify_status=new_verify_status)
                 device.write(marker_buffer)
                 device.flush()
-                os.fsync(device.fileno())
+                device_io.sync(device)
 
         except Exception:
             # Catch ANY exception in this method to ensure self.done is always set
