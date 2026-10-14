@@ -15,7 +15,7 @@
 | Device/partition blocking | ✓ | ✗ | ✗ | ✗ |
 | Resume interrupted software wipes | ✓ | ✗ | ✗ | ✗ |
 | Wipe operation logging | ✓ | ✗ | ✗ | ✗ |
-| Mount detection/prevention | ✓ | ✓ | ✗ | ✗ |
+| Mount & LUKS/LVM/RAID/swap detection | ✓ | ✓ | ✗ | ✗ |
 | Fast Statistical sampling verification | ✓ | ✗ | ✗ | ✗ |
 | Certified destruction (DoD/Gutmann standards, full verification, certificates) | ✗ | ✓ | ✗ | ✗ |
 
@@ -30,7 +30,7 @@
 * **Multiple simultaneous wipes** - Start wipes on multiple devices at once with individual progress tracking and completion states
 * **Persistent state tracking** - Wipe status survives reboots; partially wiped and completed states persist on the device (can resume wipes across power cycles)
 * **Smart device identification** - Uses UUID/PARTUUID/serial numbers for stable device tracking across reconnections
-* **Safety protections** - Prevents wiping mounted devices, detects overlapping wipes, supports device blocking, inline confirmation prompts
+* **Safety protections** - Prevents wiping mounted or in-use devices (including LUKS/LVM/RAID containers and swap), detects overlapping wipes, supports device blocking, inline confirmation prompts
 * **Intelligent verification with statistical sampling** - Fast verification that covers entire disk even at low percentages (1% verification samples from all 100 disk sections)
 * **Direct I/O to disk** - Fast and efficient wiping that avoids page cache pollution with automatic slowdown/stall detection and graceful abort
 * **Multiple color themes** - Terminal color themes designed for readability with context-sensitive visual feedback (mounted devices dimmed, active wipes bright)
@@ -75,7 +75,7 @@
 `dwipe` provides comprehensive disk wiping capabilities with safety features:
 
 * **Smart device display** - Shows disks and partitions with labels, sizes, types, and vendor/model information to help identify devices correctly
-* **Safety protections** - Prevents wiping mounted devices, detects overlapping wipes, supports manual disk blocking
+* **Safety protections** - Prevents wiping mounted or in-use devices (including LUKS/LVM/RAID containers and swap), detects overlapping wipes, supports manual disk blocking
 * **Hot-swap detection** - Updates the device list when storage changes; newly added devices are marked with **^** to make them easy to spot
 * **Multiple simultaneous wipes** - Start wipes on multiple devices at once, with individual progress tracking and completion states
 * **Flexible wipe modes** - Choose between Rand, Zero, Rand+V (with auto-verify), or Zero+V (with auto-verify)
@@ -132,7 +132,7 @@ Simply run `dwipe` from the command line without arguments: `dwipe`
 
 `dwipe` uses color coding to provide instant visual feedback about device and operation status:
 
-- **Dimmed (gray)** - Mounted or blocked devices (cannot be wiped)
+- **Dimmed (gray)** - Mounted, in-use (LUKS/LVM/RAID/swap), or blocked devices (cannot be wiped)
 - **Default (white)** - Ready to wipe, idle state, or previously wiped (before this session)
 - **Bright cyan/blue + bold** - Active wipe or verification in progress (0-100% write, v0-v100% verify)
 - **Bold yellow** - Stopped or partially completed wipe
@@ -174,7 +174,7 @@ The **STATE** column shows the current status of each device:
 |-------|---------|
 | **-** | Device is ready for wiping |
 | **^** | Device is ready for wiping AND was added after `dwipe` started (hot-swapped) |
-| **Mnt** | Partition is mounted or disk has mounted partitions - cannot be wiped |
+| **Mnt** | Partition/disk is mounted, or in use via a swap/LUKS/LVM/RAID mapping - cannot be wiped |
 | **N%** | Wipe is in progress (shows percentage complete, 0-100%) |
 | **vN%** | Verification is in progress (shows percentage complete, v0-v100%) |
 | **STOP** | Wipe or verification is being stopped |
@@ -182,6 +182,19 @@ The **STATE** column shows the current status of each device:
 | **W** | Wipe was completed successfully (can wipe again or verify) |
 | **Blk** | Disk is manually blocked - partitions are hidden and cannot be wiped |
 | **Unbl** | Disk was just unblocked (transitory state) |
+
+### Mounts / Status Column
+
+The **MOUNTS/STATUS** column shows how a device is currently in use:
+
+| Display | Meaning |
+|---------|---------|
+| **/**, **/data** | A real mount point (mounted directly, or through a LUKS/LVM/RAID mapping) |
+| **\busy** | In use but not mounted — e.g. an *open* LUKS container, an active LVM volume group, a running RAID array, or active swap |
+
+Both are treated as mounted: the device is dimmed and **w** (wipe) is not offered. `\busy` uses a backslash (not `/`) to make clear it is not a real mount point, yet it is treated like one for safety. To wipe such a device, first release the layer holding it (see [Wipe issues](#wipe-issues)).
+
+> **Note:** A device held by a lower layer (dm-crypt/LUKS, LVM, md/RAID, swap) is protected even when it is not itself mounted. Wiping the backing device while a mapping is active would corrupt the container, so `dwipe` treats it as mounted. Mount points reached through a mapping are attributed back to the underlying device, so a LUKS partition shows the mount of its unlocked mapping.
 
 ### Available Actions
 
@@ -448,8 +461,13 @@ Press **ESC** from the main screen to clear the filter and return to showing all
 - **Colors don't work** - Ensure your terminal supports colors (most modern terminals do)
 
 ### Wipe issues
-- **Can't wipe a device** - Check the STATE column:
+- **Can't wipe a device** - Check the STATE and MOUNTS/STATUS columns:
   - **Mnt** - Unmount the partition first: `sudo umount /dev/sdXN`
+  - **`\busy`** status, or **Mnt** caused by a lower layer - release the mapping/volume first, then rescan (**r**):
+    - LUKS: unmount, then `sudo cryptsetup close <name>`
+    - LVM: `sudo vgchange -an <vg>` (deactivate the volume group)
+    - RAID: `sudo mdadm --stop /dev/mdX`
+    - Swap: `sudo swapoff /dev/...`
   - **Blk** - Press **b** to unblock
   - **Busy** - Another partition on the disk is being wiped
 - **Wipe is very slow** - Normal for large drives; check write rate to verify progress

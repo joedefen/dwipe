@@ -110,6 +110,16 @@ class DiskWipe:
         """Start the wipe job after confirmation"""
         if self.confirmation.identity and self.confirmation.identity in self.partitions:
             part = self.partitions[self.confirmation.identity]
+
+            # Last-instant safety: refuse if the device became in use (mounted,
+            # swap, or held by LUKS/LVM/RAID) since the last discovery refresh.
+            # Non-blocking, sysfs/procfs only.
+            if DeviceInfo.device_in_use(part.name):
+                part.mounts = ['\u26a0 Device is in use (mounted or held by LUKS/LVM/RAID)']
+                self.confirmation.cancel()
+                self.win.passthrough_mode = False
+                return
+
             # Clear any previous verify failure message when starting wipe
             if hasattr(part, 'verify_failed_msg'):
                 delattr(part, 'verify_failed_msg')

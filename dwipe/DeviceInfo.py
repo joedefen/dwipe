@@ -99,6 +99,7 @@ class DeviceInfo:
                                hw_caps_state=ProbeState.PENDING,  # probe state for hw_caps
                                is_usb=False,   # True if device is on USB bus
                                is_rotational=False,  # True if HDD (spinning disk)
+                               in_use=False,   # mounted/swap or backing an active holder
                                )
 
     def get_hw_capabilities(self, ns):
@@ -256,11 +257,39 @@ class DeviceInfo:
             pass
         return devices
 
+    @staticmethod
+    def _block_name_from_devpath(devpath):
+        """Resolve a /dev path to its canonical kernel block name.
+
+        Handles /dev/sda1, /dev/md0, /dev/dm-0 and indirection through
+        /dev/mapper/<name> or /dev/disk/by-* (resolved via realpath).
+        Returns '' for anything that is not a block device path.
+        """
+        if not devpath.startswith('/dev/'):
+            return ''
+        try:
+            real = os.path.realpath(devpath)
+        except OSError:
+            real = devpath
+        return os.path.basename(real)
+
+    @staticmethod
+    def _read_sysfs_dir(path):
+        """List a sysfs directory, returning [] if it is missing or unreadable."""
+        try:
+            return os.listdir(path)
+        except OSError:
+            return []
+
     def _parse_proc_mounts(self):
         """Parse /proc/mounts for mount points (non-blocking).
 
         Format: device mountpoint fstype options dump pass
                 /dev/sda1 /boot ext4 rw,relatime 0 0
+
+        Device paths are resolved to canonical block names so a mount on a
+        dm-crypt/LVM/RAID mapping (e.g. /dev/mapper/crypt -> dm-0) is
+        attributed to the underlying block device.
 
         Returns:
             dict: {device_name: {'mounts': [mountpoint1, ...], 'fstype': str}}
@@ -271,7 +300,9 @@ class DeviceInfo:
                 for line in f:
                     parts = line.split()
                     if len(parts) >= 3 and parts[0].startswith('/dev/'):
-                        device = parts[0][5:]  # Strip '/dev/'
+                        device = self._block_name_from_devpath(parts[0])
+                        if not device:
+                            continue
                         mountpoint = parts[1]
                         fstype = parts[2]
                         if device not in mounts:
@@ -280,6 +311,88 @@ class DeviceInfo:
         except (FileNotFoundError, PermissionError, Exception):
             pass
         return mounts
+
+    @staticmethod
+    def _parse_proc_swaps():
+        """Return canonical block names currently used as swap (non-blocking)."""
+        names = set()
+        try:
+            with open('/proc/swaps', 'r', encoding='utf-8') as f:
+                next(f, None)  # skip header line
+                for line in f:
+                    parts = line.split()
+                    if parts:
+                        name = DeviceInfo._block_name_from_devpath(parts[0])
+                        if name:
+                            names.add(name)
+        except (FileNotFoundError, PermissionError, Exception):
+            pass
+        return names
+
+    def _mark_block_usage(self, entries, swap_names):
+        """Flag devices consumed by a holder (LUKS, LVM, RAID, ...).
+
+        A device is *in use* when it is mounted, used as swap, or backs any
+        holder (an active dm/md mapping). Mountpoints of a mounted holder are
+        propagated down its slave chain so a LUKS container shows the mount of
+        its unlocked mapping; a holder that is open but unmounted marks the
+        backing device in-use (rendered as '\\busy'). All reads are sysfs-only
+        and non-blocking.
+        """
+        holders, slaves = {}, {}
+        for name in entries:
+            holders[name] = self._read_sysfs_dir(f'/sys/class/block/{name}/holders')
+            slaves[name] = self._read_sysfs_dir(f'/sys/class/block/{name}/slaves')
+
+        # Seed the walk with devices that are mounted or used as swap
+        queue = [n for n, ns in entries.items() if ns.mounts]
+        for name in swap_names:
+            if name in entries:
+                entries[name].in_use = True
+                if name not in queue:
+                    queue.append(name)
+        visited = set(queue)
+
+        # Propagate mount visibility down to backing devices via slaves
+        while queue:
+            cur = queue.pop()
+            cur_mounts = entries[cur].mounts if cur in entries else []
+            for backing in slaves.get(cur, []):
+                if backing not in entries:
+                    continue
+                bns = entries[backing]
+                for mount in cur_mounts:
+                    if mount not in bns.mounts:
+                        bns.mounts.append(mount)
+                bns.in_use = True
+                if backing not in visited:
+                    visited.add(backing)
+                    queue.append(backing)
+
+        # Any device with a holder is in use (mapping active) even if unmounted
+        for name, holder_list in holders.items():
+            if holder_list and name in entries:
+                entries[name].in_use = True
+
+    @staticmethod
+    def device_in_use(name):
+        """Best-effort, non-blocking check that a device is in use right now.
+
+        Guards a wipe at the moment it starts, closing the window between a
+        discovery refresh and the actual write. True if the device has any
+        holder (active dm/md mapping) or is currently mounted.
+        """
+        if DeviceInfo._read_sysfs_dir(f'/sys/class/block/{name}/holders'):
+            return True
+        try:
+            with open('/proc/mounts', 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.split()
+                    if parts and DeviceInfo._block_name_from_devpath(parts[0]) == name:
+                        return True
+        except (FileNotFoundError, PermissionError, Exception):
+            pass
+        return False
 
     def _is_partition(self, name):
         """Check if device is a partition (non-blocking).
@@ -504,6 +617,7 @@ class DeviceInfo:
                 entry.model = getattr(prev, 'model', '')
                 entry.port = getattr(prev, 'port', '')
                 entry.is_rotational = getattr(prev, 'is_rotational', False)
+                entry.in_use = getattr(prev, 'in_use', False)
             else:
                 # Non-dark device: probe for metadata
                 if entry.type == 'disk':
@@ -578,13 +692,17 @@ class DeviceInfo:
 
             entries[name] = entry
 
+        # Phase 3c: Mark devices consumed by a holder (LUKS/LVM/RAID/swap)
+        swap_names = self._parse_proc_swaps()
+        self._mark_block_usage(entries, swap_names)
+
         # Phase 4: Build parent-child relationships (minors lists)
         for name, parent_name in parent_map.items():
             if parent_name in entries:
                 entries[parent_name].minors.append(name)
                 self.disk_majors.add(entries[name].major)
-                # Propagate mount state to parent
-                if entries[name].mounts:
+                # Propagate mount/in-use state to parent (holder-backed too)
+                if entries[name].mounts or getattr(entries[name], 'in_use', False):
                     entries[parent_name].state = 'iMnt'
 
         # Phase 4b: Clear marker display and state for disks with actual partitions
@@ -617,6 +735,7 @@ class DeviceInfo:
                     v_child.mounts = entry.mounts
                     v_child.parent = name
                     v_child.uuid = entry.uuid
+                    v_child.in_use = getattr(entry, 'in_use', False)
 
                     final_entries[v_key] = v_child
                     entry.minors.append(v_key)
@@ -738,7 +857,7 @@ class DeviceInfo:
 
             # Exclude common virtual and optical device prefixes as a safety net
             # (most should already be filtered by ro check or missing sysfs)
-            excluded_prefixes = ('zram', 'loop', 'dm-', 'ram', 'sr', 'scd')
+            excluded_prefixes = ('zram', 'loop', 'dm-', 'md', 'ram', 'sr', 'scd')
             if any(name.startswith(prefix) for prefix in excluded_prefixes):
                 continue
 
@@ -874,6 +993,9 @@ class DeviceInfo:
             elif ns.mounts:
                 # Disk has mounts - show them
                 emit += f'{sep}{",".join(ns.mounts)}'
+            elif getattr(ns, 'in_use', False):
+                # In use but not mounted (open LUKS/LVM/RAID mapping)
+                emit += f'{sep}\\busy'
             elif ns.marker and ns.marker.strip() and not ns.minors:
                 # Disk has wipe status - show it ONLY if no child partitions
                 # (partitions take precedence over marker)
@@ -886,6 +1008,9 @@ class DeviceInfo:
             emit += sep + print_str_or_dash(ns.label, wids.label)
             if ns.mounts:
                 emit += f'{sep}{",".join(ns.mounts)}'
+            elif getattr(ns, 'in_use', False):
+                # In use but not mounted (open LUKS/LVM/RAID mapping)
+                emit += f'{sep}\\busy'
             else:
                 emit += f'{sep}{ns.marker}'
 
@@ -1052,9 +1177,11 @@ class DeviceInfo:
         self.clear_inferred_states(nss)
 
         # Re-apply Mnt state for devices with mounts (cleared above, needed for set_all_states)
-        # But Blk trumps Mnt - blocked devices stay blocked even if mounted
+        # Devices that are in use (mounted/swap/backing a holder) are treated as
+        # mounted so they cannot be wiped. But Blk trumps Mnt - blocked devices
+        # stay blocked even if mounted.
         for ns in nss.values():
-            if ns.mounts and ns.state != 'Blk':
+            if (ns.mounts or getattr(ns, 'in_use', False)) and ns.state != 'Blk':
                 ns.state = 'Mnt'
 
         self.set_all_states(nss)  # set inferred states (propagates Mnt/Busy to parents)

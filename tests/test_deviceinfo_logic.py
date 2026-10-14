@@ -17,7 +17,7 @@ def make_ns(name="sda", parent=None, minors=None, state="-", dflt="-", **kw):
         state=state, dflt=dflt, job=None, fstype="", label="", uuid="",
         serial="", port="", mounts=[], size_bytes=1000, model="",
         hw_caps="", hw_caps_summary="", hw_nopes="",
-        hw_caps_state=ProbeState.PENDING, is_rotational=False,
+        hw_caps_state=ProbeState.PENDING, is_rotational=False, in_use=False,
     )
     defaults.update(kw)
     return SimpleNamespace(**defaults)
@@ -175,3 +175,95 @@ def test_tunables_get_singleton_returns_instance():
     second = Tunables.get_singleton()
     assert isinstance(first, Tunables)
     assert first is second
+
+
+# ---------------------------------------------------------------------------
+# holder (LUKS/LVM/RAID) in-use detection
+# ---------------------------------------------------------------------------
+def test_mark_block_usage_propagates_mount_to_backing(monkeypatch):
+    """A mount on a dm holder reaches the LUKS backing partition."""
+    info = make_info()
+    sda = make_ns("sda")
+    sda1 = make_ns("sda1", parent="sda")
+    dm0 = make_ns("dm-0", mounts=["/data"])
+    entries = {"sda": sda, "sda1": sda1, "dm-0": dm0}
+
+    def fake_ls(path):
+        if path.endswith("/sda1/holders"):
+            return ["dm-0"]
+        if path.endswith("/dm-0/slaves"):
+            return ["sda1"]
+        return []
+
+    monkeypatch.setattr(DeviceInfo, "_read_sysfs_dir", staticmethod(fake_ls))
+    info._mark_block_usage(entries, set())
+
+    assert sda1.mounts == ["/data"]
+    assert sda1.in_use is True
+
+
+def test_mark_block_usage_flags_open_unmounted_holder(monkeypatch):
+    """An open-but-unmounted mapping still marks the backing device in use."""
+    info = make_info()
+    sda1 = make_ns("sda1")
+    dm0 = make_ns("dm-0")  # open mapping, nothing mounted on it
+    entries = {"sda1": sda1, "dm-0": dm0}
+
+    def fake_ls(path):
+        return ["dm-0"] if path.endswith("/sda1/holders") else []
+
+    monkeypatch.setattr(DeviceInfo, "_read_sysfs_dir", staticmethod(fake_ls))
+    info._mark_block_usage(entries, set())
+
+    assert sda1.in_use is True
+    assert sda1.mounts == []
+
+
+def test_mark_block_usage_swap_flags_device(monkeypatch):
+    info = make_info()
+    sda2 = make_ns("sda2")
+    entries = {"sda2": sda2}
+
+    monkeypatch.setattr(DeviceInfo, "_read_sysfs_dir", staticmethod(lambda path: []))
+    info._mark_block_usage(entries, {"sda2"})
+
+    assert sda2.in_use is True
+
+
+# ---------------------------------------------------------------------------
+# part_str rendering: \busy vs mountpoint
+# ---------------------------------------------------------------------------
+def test_part_str_renders_busy_for_open_holder():
+    info = make_info()
+    ns = make_ns("sda1", parent="sda", state="Mnt", fstype="crypto_LUKS")
+    ns.type = "part"
+    ns.is_usb = False
+    ns.in_use = True
+    text, _ = info.part_str(ns)
+    assert "\\busy" in text
+
+
+def test_part_str_shows_mountpoint_when_mounted():
+    info = make_info()
+    ns = make_ns("sda1", parent="sda", state="Mnt", fstype="ext4", mounts=["/data"])
+    ns.type = "part"
+    ns.is_usb = False
+    text, _ = info.part_str(ns)
+    assert "/data" in text
+    assert "\\busy" not in text
+
+
+# ---------------------------------------------------------------------------
+# device_in_use (last-instant wipe guard)
+# ---------------------------------------------------------------------------
+def test_device_in_use_true_when_holder_present(monkeypatch):
+    monkeypatch.setattr(
+        DeviceInfo, "_read_sysfs_dir",
+        staticmethod(lambda path: ["dm-0"] if path.endswith("/sda1/holders") else []),
+    )
+    assert DeviceInfo.device_in_use("sda1") is True
+
+
+def test_device_in_use_false_for_plain_device(monkeypatch):
+    monkeypatch.setattr(DeviceInfo, "_read_sysfs_dir", staticmethod(lambda path: []))
+    assert DeviceInfo.device_in_use("zzfake0") is False
