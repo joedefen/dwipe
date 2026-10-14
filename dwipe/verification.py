@@ -1,8 +1,8 @@
 """Shared verification logic and statistical analysis.
 
-Both the legacy ``WipeJob.verify_partition`` path and the task-based
-``VerifyTask.run_task`` path use these helpers so there is exactly one copy of
-the (hardware-validated) verification algorithm.
+The (hardware-validated) verification algorithm lives here only, and is used by
+``VerifyTask.run_task`` so there is exactly one copy of the sampling/analysis
+logic.
 
 ``verify_device`` opens the device through the ``device_io`` seam, samples 100
 equal sections at ``verify_pct`` percent, applies a fast-fail zero check, and

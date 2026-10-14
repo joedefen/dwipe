@@ -8,6 +8,7 @@ DiskWipe class - Main application controller/singleton
 # pylint: disable=too-few-public-methods
 import os
 import sys
+import subprocess
 import re
 import time
 import threading
@@ -27,6 +28,21 @@ from .Utils import Utils
 from .PersistentState import PersistentState
 from .StructuredLogger import StructuredLogger
 from .DeviceChangeMonitor import DeviceChangeMonitor
+
+
+def _restore_terminal():
+    """Clear the screen and restore sane tty settings without a shell.
+
+    Replaces ``os.system('clear; stty sane')`` so the exit paths do not depend
+    on ``/bin/sh`` or on the external ``clear`` binary being present.
+    """
+    sys.stdout.write('\033[2J\033[H')
+    sys.stdout.flush()
+    try:
+        subprocess.run(['stty', 'sane'], check=False)
+    except OSError:
+        pass
+
 
 # Screen constants
 MAIN_ST = 0
@@ -284,7 +300,7 @@ class DiskWipe:
             jobs_running = sum(1 for part in self.partitions.values() if part.job)
             if jobs_running == 0:
                 self.win.stop_curses()
-                os.system('clear; stty sane')
+                _restore_terminal()
                 sys.exit(0)
             return True  # continue running
 
@@ -1095,7 +1111,7 @@ class MainScreen(DiskWipeScreen):
         def exit_if_no_jobs():
             if stop_all() == 0:
                 app.win.stop_curses()
-                os.system('clear; stty sane')
+                _restore_terminal()
                 sys.exit(0)
 
         app.exit_when_no_jobs = True
@@ -1615,7 +1631,7 @@ class HistoryScreen(DiskWipeScreen):
 
         # Exit curses to use the terminal
         ConsoleWindow.stop_curses()
-        os.system('clear; stty sane')
+        _restore_terminal()
 
         # Print with border
         print('=' * 60)

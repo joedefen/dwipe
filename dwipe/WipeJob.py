@@ -9,13 +9,11 @@ import time
 import threading
 import random
 import traceback
-import subprocess
 import mmap
 from types import SimpleNamespace
 
 from . import device_io
 from . import markers
-from . import verification
 from .Utils import Utils
 from .WipeTask import WipeTask
 from .WriteTask import WriteTask, WriteZeroTask, WriteRandTask
@@ -127,7 +125,7 @@ class WipeJob:
             device_path: Path to device (e.g., '/dev/sda1')
             total_size: Total size in bytes
             opts: Options namespace
-            tasks: List of WipeTask instances to execute sequentially (if None, legacy mode)
+            tasks: List of WipeTask instances to execute sequentially
         """
         self.opts = opts
         self.device_path = device_path
@@ -140,7 +138,7 @@ class WipeJob:
         self.current_task = None  # Currently executing task
         self.current_task_index = 0  # Index of current task
 
-        # Legacy attributes (kept for backwards compatibility)
+        # Job-level attributes (aggregated/proxied from tasks for display/logging)
         self.start_mono = time.monotonic()  # Track the start time
         self.total_written = 0  # Will be set by tasks
         self.resume_from = 0  # Track resume offset
@@ -564,64 +562,6 @@ class WipeJob:
         job.thread.start()
         return job
 
-    def _check_for_stall(self, current_monotonic):
-        """Check for stall (no progress) - called frequently"""
-        if self.stall_timeout <= 0:
-            return False
-
-        time_since_progress = current_monotonic - self.last_progress_mono
-        self.max_stall_secs = max(time_since_progress, self.max_stall_secs)
-        if time_since_progress >= self.stall_timeout:
-            self.do_abort = True
-            self.exception = f"Stall detected: No progress for {time_since_progress:.1f} seconds"
-            return True
-
-        return False
-
-    def _check_for_slowdown(self, current_monotonic):
-        """Check for slowdown - called every 10 seconds"""
-        if self.slowdown_stop <= 0 or self.baseline_speed is None or self.baseline_speed <= 0:
-            return False
-
-        # Calculate current speed over last 30 seconds
-        floor = current_monotonic - 30
-        recent_history = [h for h in self.wr_hists if h.mono >= floor]
-
-        if len(recent_history) >= 2:
-            recent_start = recent_history[0]
-            recent_written = self.total_written - recent_start.written
-            recent_elapsed = current_monotonic - recent_start.mono
-
-            if recent_elapsed > 1.0:
-                current_speed = recent_written / recent_elapsed
-                self.baseline_speed = max(self.baseline_speed, current_speed)
-                slowdown_ratio = self.baseline_speed / max(current_speed, 1)
-                slowdown_ratio = int(round(slowdown_ratio, 0))
-                self.max_slowdown_ratio = max(self.max_slowdown_ratio, slowdown_ratio)
-
-                if slowdown_ratio > self.slowdown_stop:
-                    self.do_abort = True
-                    self.exception = (f"Slowdown abort: ({Utils.human(current_speed)}B/s)"
-                                     f" is 1/{slowdown_ratio} baseline")
-                    return True
-
-        return False
-
-    def _update_baseline_if_needed(self, current_monotonic):
-        """Update baseline speed measurement if still in first 60 seconds"""
-        if self.baseline_speed is not None:
-            return  # Baseline already established
-
-        if (current_monotonic - self.start_mono) >= 60:
-            total_written_60s = self.total_written - self.resume_from
-            elapsed_60s = current_monotonic - self.start_mono
-            if elapsed_60s > 0:
-                self.baseline_speed = total_written_60s / elapsed_60s
-                self.baseline_end_mono = current_monotonic
-                self.last_slowdown_check = current_monotonic  # Start slowdown checking
-
-
-
     def get_status_str(self):
         """Get human-readable status string"""
         elapsed_time = time.monotonic() - self.start_mono
@@ -974,53 +914,9 @@ class WipeJob:
         Returns:
             bool: True for random, False for zeros
         """
-        if self.passes == 1:
-            # Single pass: just write desired pattern
-            return desired_mode == 'Rand'
-
-        # Multi-pass: alternate patterns, ending on desired
-        # Final pass is always desired pattern
-        if pass_number == self.passes - 1:
-            return desired_mode == 'Rand'
-
-        # Earlier passes: alternate, starting with opposite
-        # If desired is Rand: pass 0=Zero, 1=Rand, 2=Zero, 3=Rand
-        # If desired is Zero: pass 0=Rand, 1=Zero, 2=Rand, 3=Zero
-        if desired_mode == 'Rand':
-            # Even passes (0, 2, ...) = Zero, odd (1, 3, ...) = Rand
-            return pass_number % 2 == 1
-        else:
-            # Even passes (0, 2, ...) = Rand, odd (1, 3, ...) = Zero
-            return pass_number % 2 == 0
-
-    def maybe_update_marker(self, is_random):
-        """Periodically update marker to enable crash recovery
-
-        Updates marker every marker_update_interval seconds (default 30s).
-        This allows resume to work even after crashes, power loss, or kill -9.
-
-        Args:
-            is_random: bool, whether random data is being written
-
-        Returns:
-            None
-        """
-        now_mono = time.monotonic()
-        if now_mono - self.last_marker_update_mono < self.marker_update_interval:
-            return  # Not time yet
-
-        # Marker writes use separate file handle (buffered I/O, not O_DIRECT)
-        # because marker buffer is not aligned
-        try:
-            with device_io.open_buffered(self.device_path, 'r+b') as marker_file:
-                marker_file.seek(0)
-                marker_file.write(self.prep_marker_buffer(is_random))
-                marker_file.flush()
-                device_io.sync(marker_file)
-            self.last_marker_update_mono = now_mono
-        except Exception:
-            # If marker update fails, just continue - we'll try again in 30s
-            pass
+        # Delegate to the single static implementation so there is exactly one
+        # copy of the multi-pass pattern rule.
+        return WipeJob._get_pass_pattern_static(pass_number, self.passes, desired_mode)
 
     @staticmethod
     def detect_pattern_on_disk(device_path, sample_size=16*1024):
@@ -1070,281 +966,10 @@ class WipeJob:
         except Exception:
             return None
 
-    def _setup_ionice(self):
-        """Setup I/O priority to best-effort class, lowest priority"""
-        try:
-            # Class 2 = best-effort, priority 7 = lowest (0 is highest, 7 is lowest)
-            subprocess.run(["ionice", "-c", "2", "-n", "7", "-p", str(os.getpid())],
-                          capture_output=True, check=False)
-        except Exception:
-            pass
-
     @staticmethod
     def read_marker_buffer(device_name, io=None):
         """Open the device and read the first 16 KB (delegates to markers)."""
         return markers.read_marker(device_name, io)
-
-    def write_partition(self):
-        """Writes random chunks to a device and updates the progress status.
-
-        Performs multiple passes if self.passes > 1 with alternating patterns:
-        - Multi-pass Rand: Zero, Rand, Zero, Rand (ends on Rand)
-        - Multi-pass Zero: Rand, Zero, Rand, Zero (ends on Zero)
-        If verify_pct > 0, automatically starts verification after write completes.
-        Supports resuming from a previous stopped wipe with current passes setting.
-        """
-        # Use resume_mode if set (from existing marker), otherwise current mode
-        mode_to_use = self.resume_mode if self.resume_mode else self.opts.wipe_mode.replace('+V', '')
-        desired_mode = mode_to_use  # 'Rand' or 'Zero' - the final desired pattern
-        self.expected_pattern = "random" if desired_mode == 'Rand' else "zeroed"
-
-        # Calculate target bytes based on current passes setting
-        target_bytes = self.passes * self.total_size
-
-        # If already at or beyond target (user reduced passes), mark as done
-        if self.total_written >= target_bytes:
-            self.done = True
-            return
-
-        try:
-            # Set low I/O priority to be nice to other system processes
-            self._setup_ionice()
-
-            # Open device with O_DIRECT for unbuffered I/O (bypasses page cache)
-            # O_DIRECT gives maximum performance with zero dirty pages
-            fd = device_io.open_direct(self.device_path, write=True)
-
-            try:
-                # Continue writing until we reach target_bytes
-                while self.total_written < target_bytes and not self.do_abort:
-                    # Calculate current pass and offset within pass
-                    self.current_pass = self.total_written // self.total_size
-                    offset_in_pass = self.total_written % self.total_size
-
-                    # SKIP MARKER AREA - don't overwrite it!
-                    if offset_in_pass < WipeTask.MARKER_SIZE:
-                        self.total_written += WipeTask.MARKER_SIZE - offset_in_pass
-                        offset_in_pass = WipeTask.MARKER_SIZE
-
-                    # Determine pattern for this pass (alternating for multi-pass)
-                    is_random_pass = self.get_pass_pattern(self.current_pass, desired_mode)
-
-                    # Seek to current position (O_DIRECT requires block-aligned seeks)
-                    device_io.lseek(fd, offset_in_pass, os.SEEK_SET)
-
-                    # Write until end of current pass or target_bytes, whichever comes first
-                    pass_remaining = self.total_size - offset_in_pass
-                    total_remaining = target_bytes - self.total_written
-                    bytes_to_write_this_pass = min(pass_remaining, total_remaining)
-
-                    pass_bytes_written = 0
-
-                    while pass_bytes_written < bytes_to_write_this_pass and not self.do_abort:
-                        current_mono = time.monotonic()
-
-                        # Update baseline if needed (first 60 seconds)
-                        self._update_baseline_if_needed(current_mono)
-
-                        # Check for stall (frequently)
-                        if self._check_for_stall(current_mono):
-                            break
-
-                        # Check for slowdown (every 10 seconds)
-                        if self.baseline_speed is not None:
-                            time_since_last_check = current_mono - self.last_slowdown_check
-                            if time_since_last_check >= 10:
-                                if self._check_for_slowdown(current_mono):
-                                    break
-                                self.last_slowdown_check = current_mono
-
-                        # Update progress tracking
-                        if self.total_written > self.last_progress_written:
-                            self.last_progress_mono = current_mono
-
-
-                        # Calculate chunk size (must be block-aligned for O_DIRECT)
-                        remaining = bytes_to_write_this_pass - pass_bytes_written
-                        chunk_size = min(WipeTask.WRITE_SIZE, remaining)
-                        # Round down to block boundary
-                        chunk_size = (chunk_size // WipeTask.BLOCK_SIZE) * WipeTask.BLOCK_SIZE
-                        if chunk_size == 0:
-                            break
-
-                        # Select buffer based on pass type
-                        if is_random_pass:
-                            # Use slice of random buffer (still aligned via memoryview)
-                            chunk = WipeTask.buffer[:chunk_size]
-                        else:
-                            # Use zero buffer
-                            chunk = WipeTask.zero_buffer[:chunk_size]
-
-                        try:
-                            # Write with O_DIRECT (bypasses page cache)
-                            bytes_written, fd = self.safe_write(fd, chunk)
-                        except Exception as e:
-                            # Save exception for debugging
-                            self.exception = str(e)
-                            self.do_abort = True
-                            bytes_written = 0
-
-                        self.total_written += bytes_written
-                        pass_bytes_written += bytes_written
-
-                        # Periodically update marker for crash recovery (every 30s)
-                        # Note: marker writes use separate buffered file handle
-                        if self.total_written > WipeTask.MARKER_SIZE:
-                            marker_is_random = (desired_mode == 'Rand')
-                            self.maybe_update_marker(marker_is_random)
-
-                        # Check for errors or incomplete writes
-                        if bytes_written < chunk_size:
-                            break
-
-                # O_DIRECT has no dirty pages - close is instant
-            finally:
-                # Close device file descriptor
-                if fd is not None:
-                    device_io.close(fd)
-
-            # Write final marker buffer at beginning after ALL passes complete
-            # Skip marker write on abort to avoid blocking on problematic devices
-            # Use separate buffered file handle (marker is not O_DIRECT aligned)
-            if self.total_written > 0 and not self.do_abort:
-                try:
-                    final_is_random = (desired_mode == 'Rand')
-                    with device_io.open_buffered(self.device_path, 'r+b') as marker_file:
-                        marker_file.seek(0)
-                        marker_file.write(self.prep_marker_buffer(final_is_random))
-                        marker_file.flush()
-                        device_io.sync(marker_file)
-                except Exception:
-                    # Log marker write failure but don't fail the whole job
-                    self.exception = f"Marker write failed: {traceback.format_exc()}"
-
-            # Auto-start verification if enabled and write completed successfully
-            verify_pct = getattr(self.opts, 'verify_pct', 0)
-            auto_verify = getattr(self.opts, 'wipe_mode', "").endswith('+V')
-            if auto_verify and not self.do_abort and not self.exception:
-                # Default to 2% verification if +V mode enabled but verify_pct not set
-                actual_verify_pct = verify_pct if verify_pct > 0 else 2
-                self.verify_partition(actual_verify_pct)
-                # Write marker with verification status after verification completes
-                # Use desired_mode to determine if random or zero
-                is_random = (desired_mode == 'Rand')
-                self._write_marker_with_verify_status(is_random)
-            else:
-                self.done = True
-        except Exception:
-            self.exception = traceback.format_exc()
-        finally:
-            # ALWAYS ensure job is marked as done, even if exception or early return
-            if not self.done:
-                self.done = True
-
-    def safe_write(self, fd, chunk):
-        """Safe write with error recovery.
-
-        Returns:
-            tuple: (bytes_written, fd) - bytes_written is either:
-                   - Actual bytes written (success)
-                   - len(chunk) (failed but non-fatal - skip entire chunk)
-                   fd might be new if reopened
-
-        Raises:
-            Exception: If should abort (too many consecutive errors)
-        """
-        consecutive_errors = 0
-        while True:  # Keep trying until success, skip, or abort
-            try:
-                bytes_written = device_io.write(fd, chunk)
-                self.reopen_count = 0
-                return bytes_written, fd # success
-
-            except Exception as e:
-                consecutive_errors += 1
-                self.total_errors += 1
-
-                # Check if we should abort
-                if consecutive_errors >= self.max_consecutive_errors:
-                    raise Exception(f"{consecutive_errors} consecutive write errors") from e
-
-                if self.total_errors >= self.max_total_errors:
-                    raise Exception(f"{self.total_errors} total write errors") from e
-
-                # Not fatal yet - try reopening if enabled
-                if self.reopen_on_error:
-                    try:
-                        current_pos = self.total_written
-                        # Open new fd first
-                        new_fd = device_io.open_direct(self.device_path, write=True)
-                        try:
-                            # Seek to correct position on new fd
-                            device_io.lseek(new_fd, current_pos, os.SEEK_SET)
-                            # Only close old fd after new one is ready
-                            old_fd = fd
-                            fd = new_fd
-                            try:
-                                device_io.close(old_fd)
-                            except Exception:
-                                pass  # Old fd close failed, but new fd is good
-                            self.reopen_count += 1
-                        except Exception:
-                            # New fd setup failed, close it and keep using old fd
-                            device_io.close(new_fd)
-                            raise
-                    except Exception:
-                        # Reopen failed - count as another error and retry with old fd
-                        self.total_errors += 1
-
-                # Retry the write (continue loop)
-
-    def verify_partition(self, verify_pct):
-        """Verify partition via the shared verification helper.
-
-        Delegates the sampling/analysis work to ``verification.verify_device``
-        so the algorithm lives in exactly one place.
-        """
-        # Initialize verify state
-        if not self.verify_phase:
-            self.verify_pct = verify_pct
-            self.verify_start_mono = time.monotonic()
-            self.verify_progress = 0
-            self.wr_hists = []
-            self.wr_hists.append(SimpleNamespace(mono=self.verify_start_mono, written=0))
-            self.verify_phase = True
-
-        def on_progress(nbytes):
-            self.verify_progress += nbytes  # Track actual bytes read for progress
-
-        result, pattern, sections = verification.verify_device(
-            device_io,
-            self.device_path,
-            self.total_size,
-            verify_pct,
-            self.expected_pattern,
-            fast_fail=(self.expected_pattern == "zeroed"),
-            is_aborted=lambda: self.do_abort,
-            on_progress=on_progress,
-        )
-        self.verify_result = result
-        self.expected_pattern = pattern
-        self.section_results = sections
-
-
-
-
-
-
-    def _analyze_section_randomness(self, byte_counts, total_samples):
-        """Analyze if a section appears random (delegates to verification)."""
-        return verification.analyze_section_randomness(byte_counts, total_samples)
-
-
-
-
-
-
-
 
     def _write_final_marker(self):
         """Write final marker after write tasks complete (shows 100% completion)
