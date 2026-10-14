@@ -6,3 +6,5 @@ venv.zd/
 *.pyc
 *egg-info*
 dist/
+.coverage
+htmlcov/

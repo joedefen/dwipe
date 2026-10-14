@@ -351,7 +351,6 @@ class SataTool:
         }
 
 
-
     def rescue_locked_drive(self, password="NULL", db=False):
         """Attempts to unlock and disable security on a bricked drive."""
 

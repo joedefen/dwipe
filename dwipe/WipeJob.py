@@ -190,7 +190,6 @@ class WipeJob:
         self.total_errors = 0 # cumulative
 
 
-
     def run_tasks(self):
         """Execute task sequence and update WipeJob state from tasks
 

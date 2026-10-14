@@ -43,3 +43,7 @@ addopts = "-ra"
 [tool.coverage.run]
 source = ["dwipe"]
 omit = ["tests/*"]
+
+[tool.coverage.report]
+fail_under = 40
+show_missing = true

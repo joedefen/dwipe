@@ -1162,7 +1162,7 @@ class MainScreen(DiskWipeScreen):
             if 'v' in actions:
                 # Safety check: Prevent verification on firmware wipes
                 # (Firmware wipes have built-in pre/post verification)
-                if self._is_firmware_wipe_marker(part):
+                if app._is_firmware_wipe_marker(part):
                     part.mounts = ['⚠ Firmware wipes have built-in verification - standard verify not allowed']
                     return
 
@@ -1378,7 +1378,6 @@ class HelpScreen(DiskWipeScreen):
         ]
         for opt in cli_options:
             app.win.add_body(opt, attr=cs.A_DIM)
-
 
 
 class HistoryScreen(DiskWipeScreen):

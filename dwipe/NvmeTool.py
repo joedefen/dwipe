@@ -149,7 +149,6 @@ class NvmeTool:
         return "OK"
 
 
-
     def start_wipe(self, method='format_crypto'):
         ctrl_path = re.sub(r'n\d+$', '', self.device_path)
 

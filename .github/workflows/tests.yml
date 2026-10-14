@@ -25,4 +25,23 @@ jobs:
           pip install -e '.[test]'
 
       - name: Run unit tests with coverage
-        run: pytest --cov=dwipe --cov-report=term-missing
+        run: pytest --cov=dwipe --cov-report=term-missing --cov-fail-under=40
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pylint
+        run: python -m pip install --upgrade pip pylint
+
+      - name: Static checks (undefined names / bad calls)
+        # Full advisory lint is available locally via ./linter. This job blocks
+        # only on the error classes that indicate real bugs (undefined name,
+        # bad call signature) and currently passes at 10.00/10.
+        run: pylint --disable=all --enable=E0601,E0602,E0603,E1120,E1121 dwipe
