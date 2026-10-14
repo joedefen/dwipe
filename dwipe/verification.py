@@ -11,6 +11,7 @@ performs chi-square-like randomness analysis on non-zero data.
 # pylint: disable=broad-exception-caught
 import os
 import random
+import traceback
 
 from .WipeTask import WipeTask
 from .Utils import Utils
@@ -238,6 +239,7 @@ def verify_device(io, device_path, total_size, verify_pct, expected_pattern,
         finally:
             io.close(fd)
     except Exception:
+        Utils.get_logger().error(f"verify_device failed: {traceback.format_exc()}")
         return "error", expected_pattern, section_results
 
     # Determine overall result

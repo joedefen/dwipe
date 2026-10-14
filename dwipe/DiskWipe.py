@@ -1548,7 +1548,7 @@ class HistoryScreen(DiskWipeScreen):
                     for line in lines:
                         win.add_body(f"  {line}", context=Context("body", timestamp=timestamp))
 
-                except Exception as e:
+                except (TypeError, ValueError, KeyError) as e:
                     win.add_body(f"  (error formatting: {e})", attr=cs.A_DIM)
 
             # Empty line between entries

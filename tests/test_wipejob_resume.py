@@ -198,3 +198,17 @@ def test_run_tasks_resumes_from_existing_marker():
     assert marker is not None
     assert marker.scrubbed_bytes == total
     assert marker.mode == "Zero"
+
+
+# ---------------------------------------------------------------------------
+# R3: an indeterminate on-disk pattern must restart the final pass
+# ---------------------------------------------------------------------------
+def test_plan_job_indeterminate_pattern_restarts_final_pass(monkeypatch):
+    monkeypatch.setattr(WipeJob, "detect_pattern_on_disk",
+                        staticmethod(lambda *a, **k: None))  # unreadable
+    opts = make_opts(passes=1, wipe_mode="Zero")
+    marker = make_marker(500_000, 1_000_000, passes=1, mode="Zero")
+    tasks, resume_from, resume_mode = WipeJob.plan_job(
+        "/dev/loop0", 1_000_000, opts, marker)
+    assert resume_from == 0          # restarted, not resumed at 500k
+    assert resume_mode == "Zero"

@@ -370,7 +370,7 @@ class DeviceWorker(threading.Thread):
                 error_suffix = f' Err[{abort_reason}]'
 
             return f'{verify_prefix}{state} {pct}% {marker.mode} {dt.strftime("%Y/%m/%d %H:%M")}{error_suffix}'
-        except Exception:
+        except (AttributeError, TypeError, ValueError, OverflowError):
             return ''
 
     def _read_sysfs_attr(self, attr_path):

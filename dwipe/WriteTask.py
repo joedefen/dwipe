@@ -257,8 +257,10 @@ class WriteTask(WipeTask):
                 marker_file.write(self._prep_marker_buffer(is_random))
             self.last_marker_update_mono = now_mono
         except Exception:
-            # If marker update fails, just continue - we'll try again in 30s
-            pass
+            # If marker update fails, just continue - we'll try again in 30s -
+            # but record it so silent resume-metadata loss is diagnosable.
+            Utils.get_logger().debug(
+                f"marker update failed for {self.device_path}: {traceback.format_exc()}")
 
     def _prep_marker_buffer(self, is_random):
         """Prepare marker buffer for this write task

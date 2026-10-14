@@ -98,8 +98,8 @@ class SataTool:
         try:
             with open(model_path, 'r', encoding='utf-8') as f:
                 model = f.read().strip()
-        except Exception:
-            pass
+        except OSError as e:
+            Utils.get_logger().debug(f"model read failed for {dev_name}: {e}")
 
         # 2. Get Serial from /dev/disk/by-id (Kernel Cache)
         disk_id_path = "/dev/disk/by-id"
@@ -129,7 +129,7 @@ class SataTool:
                             if len(parts) > 1:
                                 serial = parts[-1]
                             break
-                except Exception:
+                except OSError:
                     continue
 
         return model, serial

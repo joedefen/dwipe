@@ -18,6 +18,7 @@ import time
 from types import SimpleNamespace
 
 from .WipeTask import WipeTask
+from .Utils import Utils
 
 # Fields accepted by parse_marker_buffer, with the type each must have.
 _INT_FIELDS = ("unixtime", "scrubbed_bytes", "size_bytes", "passes")
@@ -98,7 +99,7 @@ def parse_marker_buffer(buffer):
 
     try:
         data = json.loads(json_data_bytes.decode("utf-8"))
-    except (json.JSONDecodeError, Exception):
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None  # Invalid JSON data!
 
     rv = {}
@@ -134,8 +135,10 @@ def read_marker(device_name, io=None):
         with io.open_buffered(f"/dev/{device_name}", "rb") as device:
             device.seek(0)
             buffer = device.read(WipeTask.MARKER_SIZE)
-    except Exception:
-        return None  # cannot find info
+    except OSError as e:
+        # Device missing/unreadable - common for partitions with no marker.
+        Utils.get_logger().debug(f"read_marker({device_name}) failed: {e}")
+        return None
     return parse_marker_buffer(buffer)
 
 

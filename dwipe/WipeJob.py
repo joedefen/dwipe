@@ -36,7 +36,7 @@ class WipeJob:
                 for line in f:
                     if line.startswith('Dirty:'):
                         return int(line.split()[1])
-        except Exception:
+        except (OSError, ValueError, IndexError):
             pass
         return 0
 
@@ -49,7 +49,7 @@ class WipeJob:
                     if line.startswith('MemTotal:'):
                         # Value is in KB, convert to MB
                         return int(line.split()[1]) // 1024
-        except Exception:
+        except (OSError, ValueError, IndexError):
             pass
         return 8192  # Default to 8GB if we can't read
 
@@ -312,7 +312,10 @@ class WipeJob:
                         marker_file.flush()
                         device_io.sync(marker_file)
                 except Exception:
-                    pass  # Don't fail the stop on marker write error
+                    # Don't fail the stop on marker write error, but record it.
+                    Utils.get_logger().debug(
+                        f"stop marker write failed for {self.device_path}: "
+                        f"{traceback.format_exc()}")
 
             # Always mark as done when tasks complete
             self.done = True
@@ -359,7 +362,8 @@ class WipeJob:
         Smart resume logic for multi-pass:
         - If resuming in the final pass, checks pattern on disk
         - If pattern matches expected for final pass, resumes from current position
-        - If pattern doesn't match, restarts final pass from beginning
+        - If the pattern does not match (or cannot be read), restarts the final
+          pass from its beginning
         This prevents mixed patterns (e.g., random then zeros) in the final result.
 
         Args:
@@ -419,10 +423,15 @@ class WipeJob:
                     expected_is_random = WipeJob._get_pass_pattern_static(
                         last_pass_num, passes, resume_mode)
 
-                    # Detect actual pattern on disk
+                    # Detect actual pattern (None => unreadable/indeterminate)
                     actual_is_random = WipeJob.detect_pattern_on_disk(device_path)
 
-                    if expected_is_random != actual_is_random:
+                    if actual_is_random is None:
+                        # Cannot determine the on-disk pattern: restart the final
+                        # pass so we never leave a mixed (part-random/part-zero)
+                        # result. Indeterminate must NOT be treated as zeros.
+                        resume_from = last_pass_num * total_size
+                    elif expected_is_random != actual_is_random:
                         # Pattern mismatch - restart final pass from beginning
                         resume_from = last_pass_num * total_size
                     else:
@@ -929,7 +938,8 @@ class WipeJob:
             sample_size: Number of bytes to sample (default 16KB)
 
         Returns:
-            bool: True if random pattern detected, False if zeros detected
+            bool | None: True if random, False if zeros, or None if the device
+                could not be read (indeterminate - not to be treated as zeros).
         """
         try:
             with device_io.open_buffered(device_path, 'rb') as device:
@@ -948,8 +958,13 @@ class WipeJob:
 
                 # Otherwise, assume random
                 return True
-        except Exception:
-            return False  # Error reading, assume zeros
+        except OSError:
+            # Unreadable device: the pattern is *indeterminate*, which must not
+            # be conflated with "zeros". Resume logic restarts the pass on None.
+            Utils.get_logger().debug(
+                f"detect_pattern_on_disk: cannot read {device_path}: "
+                f"{traceback.format_exc()}")
+            return None
 
     def _get_device_major_minor(self):
         """Get major:minor device numbers for the device
@@ -962,7 +977,7 @@ class WipeJob:
             major = os.major(stat_info.st_rdev)
             minor = os.minor(stat_info.st_rdev)
             return f"{major}:{minor}"
-        except Exception:
+        except OSError:
             return None
 
     @staticmethod

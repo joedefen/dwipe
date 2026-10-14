@@ -197,3 +197,12 @@ def test_detect_pattern_on_disk_random(monkeypatch):
 def test_detect_pattern_on_disk_empty_is_zeros(monkeypatch):
     monkeypatch.setattr(builtins, "open", lambda *a, **k: _sample_file(b""))
     assert WipeJob.detect_pattern_on_disk("/dev/loop0") is False
+
+
+def test_detect_pattern_on_disk_unreadable_is_indeterminate(monkeypatch):
+    # R3: an I/O failure must NOT be reported as "zeros" - it is indeterminate.
+    def boom(*a, **k):
+        raise OSError("device not readable")
+
+    monkeypatch.setattr(builtins, "open", boom)
+    assert WipeJob.detect_pattern_on_disk("/dev/loop0") is None

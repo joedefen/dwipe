@@ -39,7 +39,8 @@ class NvmeTool:
             if json_out and res.stdout:
                 return json.loads(res.stdout)
             return res
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            Utils.get_logger().debug(f"nvme command {cmd!r} failed: {e}")
             return None
 
     def get_supported_lbaf(self):
@@ -73,8 +74,8 @@ class NvmeTool:
                         return 0
 
                 return current_lbaf
-        except Exception:
-            pass
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            Utils.get_logger().debug(f"get_supported_lbaf failed: {e}")
         return 0  # Default to format 0
 
     def refresh_capabilities(self):

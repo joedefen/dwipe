@@ -753,8 +753,10 @@ class FirmwarePostVerifyTask(WipeTask):
             markers.write_marker(self.device_path, buffer, device_io, mode='wb')
 
         except Exception:
-            # Don't fail the job if marker update fails
-            pass
+            # Don't fail the job if marker update fails, but record it.
+            Utils.get_logger().debug(
+                f"marker verify-status update failed for {self.device_path}: "
+                f"{traceback.format_exc()}")
 
     def run_task(self):
         """Read test blocks and verify they differ from originals by 95%+"""
