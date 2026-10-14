@@ -6,6 +6,7 @@ flow or return values.
 """
 import os
 import sys
+import time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -62,7 +63,9 @@ def test_write_task_marker_failure_is_logged(monkeypatch):
     rec = _use_recorder(monkeypatch)
     task = WriteZeroTask("/dev/loop0", 4096,
                          SimpleNamespace(slowdown_stop=0, stall_timeout=0))
-    task.last_marker_update_mono = 0  # force the update to be due
+    # Force the update to be due without assuming system uptime exceeds the
+    # interval (time.monotonic() is small on freshly-booted CI runners).
+    task.last_marker_update_mono = time.monotonic() - task.marker_update_interval - 1
 
     def boom(path, mode="rb"):
         raise OSError("marker write failed")
