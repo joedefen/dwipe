@@ -38,6 +38,7 @@ def test_defaults(tmp_config_state):
     assert state.state["passes"] == 1
     assert state.state["verify_pct"] == 1
     assert state.state["port_serial"] == "Auto"
+    assert state.state["auto_block_containers"] is True
     assert state.state["devices"] == {}
 
 
@@ -142,6 +143,46 @@ def test_set_device_locked_records_metadata(tmp_config_state):
     assert entry["last_name"] == "sdc1"
     assert entry["size_bytes"] == 777
     assert "last_seen" in entry
+
+
+# ---------------------------------------------------------------------------
+# Container auto-blocking (auto flag + first-seen detection)
+# ---------------------------------------------------------------------------
+def test_auto_block_flag_and_record(tmp_config_state):
+    state = tmp_config_state()
+    part = make_part(uuid="U-1", fstype="crypto_LUKS")
+
+    assert state.has_device_record(part) is False
+    state.set_device_locked(part, True, auto=True)
+    assert state.has_device_record(part) is True
+    assert state.get_device_locked(part) is True
+    assert state.is_device_auto_blocked(part) is True
+
+
+def test_manual_block_clears_auto_flag(tmp_config_state):
+    state = tmp_config_state()
+    part = make_part(uuid="U-1", fstype="crypto_LUKS")
+
+    state.set_device_locked(part, True, auto=True)
+    assert state.is_device_auto_blocked(part) is True
+
+    # A subsequent manual block is no longer considered "auto".
+    state.set_device_locked(part, True)
+    assert state.get_device_locked(part) is True
+    assert state.is_device_auto_blocked(part) is False
+
+
+def test_unblock_keeps_record_so_it_wont_reblock(tmp_config_state):
+    state = tmp_config_state()
+    part = make_part(uuid="U-1", fstype="crypto_LUKS")
+
+    state.set_device_locked(part, True, auto=True)
+    state.set_device_locked(part, False)
+
+    assert state.get_device_locked(part) is False
+    assert state.is_device_auto_blocked(part) is False
+    # The record persists, so auto-block won't fire again on a later scan.
+    assert state.has_device_record(part) is True
 
 
 # ---------------------------------------------------------------------------

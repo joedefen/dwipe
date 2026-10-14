@@ -18,6 +18,7 @@ def make_ns(name="sda", parent=None, minors=None, state="-", dflt="-", **kw):
         serial="", port="", mounts=[], size_bytes=1000, model="",
         hw_caps="", hw_caps_summary="", hw_nopes="",
         hw_caps_state=ProbeState.PENDING, is_rotational=False, in_use=False,
+        is_container=False, auto_blocked=False,
     )
     defaults.update(kw)
     return SimpleNamespace(**defaults)
@@ -267,3 +268,47 @@ def test_device_in_use_true_when_holder_present(monkeypatch):
 def test_device_in_use_false_for_plain_device(monkeypatch):
     monkeypatch.setattr(DeviceInfo, "_read_sysfs_dir", staticmethod(lambda path: []))
     assert DeviceInfo.device_in_use("zzfake0") is False
+
+
+# ---------------------------------------------------------------------------
+# container classification (auto-block source)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "fstype,expected",
+    [
+        ("crypto_LUKS", True),
+        ("LVM2_member", True),
+        ("linux_raid_member", True),
+        ("isw_raid_member", True),
+        ("swap", True),
+        ("crypto_plain", True),
+        ("ext4", False),
+        ("vfat", False),
+        ("", False),
+    ],
+)
+def test_is_container_fstype(fstype, expected):
+    assert DeviceInfo.is_container_fstype(fstype) is expected
+
+
+def test_mark_block_usage_classifies_container(monkeypatch):
+    info = make_info()
+    luks = make_ns("sda1", fstype="crypto_LUKS")
+    plain = make_ns("sdb1", fstype="ext4")
+    entries = {"sda1": luks, "sdb1": plain}
+
+    monkeypatch.setattr(DeviceInfo, "_read_sysfs_dir", staticmethod(lambda path: []))
+    info._mark_block_usage(entries, set())
+
+    assert luks.is_container is True
+    assert plain.is_container is False
+
+
+def test_part_str_renders_auto_blocked():
+    info = make_info()
+    ns = make_ns("sda1", parent="sda", state="Blk", fstype="crypto_LUKS")
+    ns.type = "part"
+    ns.is_usb = False
+    ns.auto_blocked = True
+    text, _ = info.part_str(ns)
+    assert "auto-blocked" in text

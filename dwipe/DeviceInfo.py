@@ -27,6 +27,23 @@ class DeviceInfo:
     disk_majors = set()  # major devices that are disks
     _discovery_cycle = 0  # Counter to prove discovery is running
 
+    # Filesystem types marking an encrypted/stacked container whose contents
+    # are hidden behind another layer. These are auto-blocked on first sight.
+    CONTAINER_FSTYPES = (
+        'crypto_LUKS', 'LVM2_member', 'linux_raid_member',
+        'isw_raid_member', 'ddf_raid_member', 'swap',
+    )
+    CONTAINER_FSTYPE_PREFIXES = ('crypto_', 'DM_')
+
+    @staticmethod
+    def is_container_fstype(fstype):
+        """True if fstype marks a container (LUKS/LVM/RAID/swap)."""
+        if not fstype:
+            return False
+        if fstype in DeviceInfo.CONTAINER_FSTYPES:
+            return True
+        return any(fstype.startswith(p) for p in DeviceInfo.CONTAINER_FSTYPE_PREFIXES)
+
     @staticmethod
     def clean_partition_label(label):
         """Clean up partition labels by decoding escape sequences and simplifying common labels.
@@ -100,6 +117,8 @@ class DeviceInfo:
                                is_usb=False,   # True if device is on USB bus
                                is_rotational=False,  # True if HDD (spinning disk)
                                in_use=False,   # mounted/swap or backing an active holder
+                               is_container=False,  # LUKS/LVM/RAID/swap container
+                               auto_blocked=False,  # blocked automatically (container)
                                )
 
     def get_hw_capabilities(self, ns):
@@ -369,10 +388,16 @@ class DeviceInfo:
                     visited.add(backing)
                     queue.append(backing)
 
-        # Any device with a holder is in use (mapping active) even if unmounted
+        # Any device with a holder is in use (mapping active) even if unmounted.
+        # Also classify containers (by fstype or by an existing holder).
         for name, holder_list in holders.items():
-            if holder_list and name in entries:
-                entries[name].in_use = True
+            if name not in entries:
+                continue
+            ns = entries[name]
+            if holder_list:
+                ns.in_use = True
+            if holder_list or self.is_container_fstype(ns.fstype):
+                ns.is_container = True
 
     @staticmethod
     def device_in_use(name):
@@ -618,6 +643,7 @@ class DeviceInfo:
                 entry.port = getattr(prev, 'port', '')
                 entry.is_rotational = getattr(prev, 'is_rotational', False)
                 entry.in_use = getattr(prev, 'in_use', False)
+                entry.is_container = getattr(prev, 'is_container', False)
             else:
                 # Non-dark device: probe for metadata
                 if entry.type == 'disk':
@@ -736,6 +762,7 @@ class DeviceInfo:
                     v_child.parent = name
                     v_child.uuid = entry.uuid
                     v_child.in_use = getattr(entry, 'in_use', False)
+                    v_child.is_container = getattr(entry, 'is_container', False)
 
                     final_entries[v_key] = v_child
                     entry.minors.append(v_key)
@@ -996,6 +1023,9 @@ class DeviceInfo:
             elif getattr(ns, 'in_use', False):
                 # In use but not mounted (open LUKS/LVM/RAID mapping)
                 emit += f'{sep}\\busy'
+            elif getattr(ns, 'auto_blocked', False):
+                # Auto-blocked container (LUKS/LVM/RAID/swap)
+                emit += f'{sep}auto-blocked'
             elif ns.marker and ns.marker.strip() and not ns.minors:
                 # Disk has wipe status - show it ONLY if no child partitions
                 # (partitions take precedence over marker)
@@ -1011,6 +1041,9 @@ class DeviceInfo:
             elif getattr(ns, 'in_use', False):
                 # In use but not mounted (open LUKS/LVM/RAID mapping)
                 emit += f'{sep}\\busy'
+            elif getattr(ns, 'auto_blocked', False):
+                # Auto-blocked container (LUKS/LVM/RAID/swap)
+                emit += f'{sep}auto-blocked'
             else:
                 emit += f'{sep}{ns.marker}'
 
@@ -1166,12 +1199,20 @@ class DeviceInfo:
 
         # Apply persistent blocked states
         if self.persistent_state:
+            auto_block = getattr(self.opts, 'auto_block_containers', True)
             for ns in nss.values():
                 # Update last_seen timestamp
                 self.persistent_state.update_device_seen(ns)
+                # Auto-block containers (LUKS/LVM/RAID/swap) the first time seen.
+                # Once the user unblocks, a record exists so this won't re-block.
+                if auto_block and getattr(ns, 'is_container', False) \
+                        and not self.persistent_state.has_device_record(ns):
+                    self.persistent_state.set_device_locked(ns, True, auto=True)
                 # Apply persistent block state
                 if self.persistent_state.get_device_locked(ns):
                     ns.state = 'Blk'
+                    if self.persistent_state.is_device_auto_blocked(ns):
+                        ns.auto_blocked = True
 
         # Clear inferred states so they can be re-computed based on current job status
         self.clear_inferred_states(nss)

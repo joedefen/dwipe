@@ -46,10 +46,14 @@ def main():
                         help='stall timeout in seconds (0 = disabled)')
     parser.add_argument('--dense', choices=['True', 'False'], default='True' if persist.state['dense'] else 'False',
                         help='dense view: True (compact) or False (spaced lines)')
+    parser.add_argument('--auto-block-containers', choices=['on', 'off'],
+                        default='on' if persist.state['auto_block_containers'] else 'off',
+                        help='auto-block LUKS/LVM/RAID/swap containers on first sight (on/off)')
     opts = parser.parse_args()
 
     # Convert string booleans to actual booleans
     opts.dense = opts.dense == 'True'
+    opts.auto_block_containers = opts.auto_block_containers == 'on'
 
     dwipe = None  # Initialize to None so exception handler can reference it
     try:

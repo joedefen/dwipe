@@ -78,6 +78,8 @@ class DiskWipe:
             self.opts.stall_timeout = 60
         if not hasattr(self.opts, 'dense'):
             self.opts.dense = False
+        if not hasattr(self.opts, 'auto_block_containers'):
+            self.opts.auto_block_containers = True
         self.mounts_lines = None
         self.partitions = {}  # a dict of namespaces keyed by name
         self.wids = None
@@ -1385,6 +1387,7 @@ class HelpScreen(DiskWipeScreen):
             f'--port-serial:   {opts.port_serial:<{wid}} Show port/serial/FwCAPS',
             f'--slowdown-stop: {opts.slowdown_stop:<{wid}} Stop if disk slows',
             f'--stall-timeout: {opts.stall_timeout:<{wid}} Stall timeout in sec',
+            f'--auto-block: .  {"on" if getattr(opts, "auto_block_containers", True) else "off":<{wid}} Auto-block containers',
         ]
         for opt in cli_options:
             app.win.add_body(opt, attr=cs.A_DIM)

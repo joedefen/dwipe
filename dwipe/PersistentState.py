@@ -31,7 +31,8 @@ class PersistentState:
             'slowdown_stop': 64,  # Stop if disk slows (0=disabled, else ms interval) [default: 64]
             'stall_timeout': 60,  # Stall timeout in seconds (0=disabled) [default: 60]
             'port_serial': 'Auto',  # Show port/serial info: Auto, On, Off [default: Auto]
-            'devices': {}  # device_id -> {blocked, last_seen, last_name, size_bytes}
+            'auto_block_containers': True,  # Auto-block LUKS/LVM/RAID/swap on first sight
+            'devices': {}  # device_id -> {blocked, auto, last_seen, last_name, size_bytes}
         }
         self.dirty = False
         self.max_devices = 400
@@ -173,12 +174,15 @@ class PersistentState:
             return device_state['blocked']
         return device_state.get('locked', False)
 
-    def set_device_locked(self, partition, locked):
+    def set_device_locked(self, partition, locked, auto=False):
         """Set device block state
 
         Args:
             partition: SimpleNamespace with device info
             locked: bool, True to block device (parameter name kept for API compatibility)
+            auto: bool, True if the block was applied automatically (e.g. a
+                container such as LUKS/LVM/RAID/swap). Used to distinguish an
+                auto-block from a block the user applied explicitly.
         """
         device_id = self.make_device_id(partition)
         now = int(time.time())
@@ -188,6 +192,12 @@ class PersistentState:
 
         device_state = self.state['devices'][device_id]
         device_state['blocked'] = locked  # Only save 'blocked', not 'locked'
+        # Record 'auto' only for an active auto-block; any manual block or an
+        # unblock clears it.
+        if auto and locked:
+            device_state['auto'] = True
+        else:
+            device_state.pop('auto', None)
         # Remove old 'locked' field if it exists (gradual migration)
         device_state.pop('locked', None)
         device_state['last_seen'] = now
@@ -195,6 +205,19 @@ class PersistentState:
         device_state['size_bytes'] = partition.size_bytes
 
         self.dirty = True
+
+    def has_device_record(self, partition):
+        """True if this device already has a persisted state record.
+
+        Used to detect the *first* time a device is seen (so container
+        auto-blocking fires once and a user's explicit unblock sticks).
+        """
+        return self.make_device_id(partition) in self.state['devices']
+
+    def is_device_auto_blocked(self, partition):
+        """True if the device's block was applied automatically (container)."""
+        device_id = self.make_device_id(partition)
+        return bool(self.state['devices'].get(device_id, {}).get('auto', False))
 
     def update_device_seen(self, partition):
         """Update last_seen timestamp for a device

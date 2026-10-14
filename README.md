@@ -125,6 +125,10 @@ Simply run `dwipe` from the command line without arguments: `dwipe`
 - `--firmware-wipes` or `-F` - Enable firmware wipes
   - Enables hardware-based secure erase operations (NVMe Sanitize/Format, SATA ATA Security Erase)
   - Without this flag, only software wipes (Zero/Rand) are available
+- `--auto-block-containers {on,off}` - Auto-block encrypted/stacked containers on first sight (default: on)
+  - Blocks devices whose filesystem is a container (LUKS, LVM, RAID member, swap) the first time they are seen, so wiping requires an explicit unblock (**b**)
+  - The block is remembered per device; once you unblock, it stays unblocked
+  - Set to `off` when re-provisioning many encrypted disks to avoid unblocking each one
 - `--dump-lsblk` - Dump parsed device information and exit (for debugging)
 - `--help` - Show help message with all available options
 
@@ -180,7 +184,7 @@ The **STATE** column shows the current status of each device:
 | **STOP** | Wipe or verification is being stopped |
 | **s** | Wipe was stopped - device is partially wiped (can restart or verify) |
 | **W** | Wipe was completed successfully (can wipe again or verify) |
-| **Blk** | Disk is manually blocked - partitions are hidden and cannot be wiped |
+| **Blk** | Device/disk is blocked (with **b**, or auto-blocked when it is a LUKS/LVM/RAID/swap container) - cannot be wiped |
 | **Unbl** | Disk was just unblocked (transitory state) |
 
 ### Mounts / Status Column
@@ -195,6 +199,19 @@ The **MOUNTS/STATUS** column shows how a device is currently in use:
 Both are treated as mounted: the device is dimmed and **w** (wipe) is not offered. `\busy` uses a backslash (not `/`) to make clear it is not a real mount point, yet it is treated like one for safety. To wipe such a device, first release the layer holding it (see [Wipe issues](#wipe-issues)).
 
 > **Note:** A device held by a lower layer (dm-crypt/LUKS, LVM, md/RAID, swap) is protected even when it is not itself mounted. Wiping the backing device while a mapping is active would corrupt the container, so `dwipe` treats it as mounted. Mount points reached through a mapping are attributed back to the underlying device, so a LUKS partition shows the mount of its unlocked mapping.
+
+### Auto-Blocking Containers
+
+`dwipe` auto-blocks devices that hold encrypted or stacked containers **the first time they are seen**, whether or not they are currently in use. This guards data that is otherwise easy to wipe by accident, since a *closed* container shows almost no hint beyond its type:
+
+- `crypto_LUKS` (dm-crypt/LUKS)
+- `LVM2_member` (LVM physical volume)
+- `linux_raid_member` / `isw_raid_member` / `ddf_raid_member` (RAID members)
+- `swap`
+
+Such a device shows state **Blk** with an `auto-blocked` status, and its whole disk is protected too (inherited block). To wipe it, press **b** to unblock — the unblock is remembered, so it is not re-blocked on later scans.
+
+Auto-blocking is on by default. Disable it for bulk re-provisioning with `--auto-block-containers off` (saved as a preference).
 
 ### Available Actions
 
@@ -468,7 +485,7 @@ Press **ESC** from the main screen to clear the filter and return to showing all
     - LVM: `sudo vgchange -an <vg>` (deactivate the volume group)
     - RAID: `sudo mdadm --stop /dev/mdX`
     - Swap: `sudo swapoff /dev/...`
-  - **Blk** - Press **b** to unblock
+  - **Blk** - Press **b** to unblock (containers such as LUKS/LVM/RAID/swap are auto-blocked until you do)
   - **Busy** - Another partition on the disk is being wiped
 - **Wipe is very slow** - Normal for large drives; check write rate to verify progress
 - **Wipe seems stuck** - Most likely due to bad disks; Direct I/O makes progress almost constant on good disks.
