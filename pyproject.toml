@@ -84,10 +84,13 @@ dependencies = [
 
 [project.optional-dependencies]
 # The minimum a contributor needs to run the suite (what CI installs on every
-# supported Python).
+# supported Python).  `tomli` only appears below 3.11, where the stdlib has no
+# `tomllib`, yet tests and `bless` read pyproject.toml on every interpreter
+# `requires-python` allows.
 test = [
     'pytest >= 7.0',
     'pytest-cov >= 4.0',
+    'tomli >= 2.0; python_version < "3.11"',
 ]
 # The release toolchain.  `./bless` refuses to start unless `twine` and
 # `packaging` meet its own floors (`twine>=7`, `packaging>=26`), so declaring
@@ -100,6 +103,7 @@ dev = [
     'build >= 1.2',
     'twine >= 7',
     'packaging >= 26',
+    'tomli >= 2.0; python_version < "3.11"',
 ]
 
 [project.urls]

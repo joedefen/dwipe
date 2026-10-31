@@ -8,7 +8,10 @@ fail if any of those artefacts quietly disappears again.
 import re
 from pathlib import Path
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10, which `requires-python` still allows
+    import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 # The developer companion lives inside the package it describes.

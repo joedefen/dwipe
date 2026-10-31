@@ -29,7 +29,10 @@ import zipfile
 from email.parser import Parser
 from pathlib import Path
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10, which `requires-python` still allows
+    import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 # This module is run as a script by CI (`python tests/inspect_dist.py`), so the

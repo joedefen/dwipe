@@ -107,12 +107,16 @@ import shutil
 import subprocess
 import sys
 import time
-import tomllib
 import urllib.error
 import urllib.request
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as installed_version
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10, which `requires-python` still allows
+    import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parent
 TESTPYPI_UPLOAD = 'https://test.pypi.org/legacy/'

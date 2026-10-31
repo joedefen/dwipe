@@ -16,7 +16,11 @@ import zipfile
 from pathlib import Path
 
 import pytest
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10, which `requires-python` still allows
+    import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 
