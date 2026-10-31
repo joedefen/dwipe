@@ -34,6 +34,12 @@ too):
     python3 -m venv .venv
     .venv/bin/python -m pip install -e '.[dev]'
 
+`bless` runs every stage with `sys.executable`, so it has to be *that*
+interpreter -- the one holding `console-window` and the dev extra. Activate the
+virtualenv first, or start the gate by hand:
+
+    .venv/bin/python ./bless
+
 Then the commands `bless` runs, in the same order, on the same interpreter:
 
     python -m ruff check .
@@ -117,12 +123,16 @@ command. CI stays a gate.
 
 The branch model is part of the gate, not a convention: `bless` publishes only
 from `main` or `dev` and refuses unless *both* exist locally and as
-`origin/main` and `origin/dev`. `master` predates the gate; the release branch
-pair has to be created once:
+`origin/main` and `origin/dev`. `master` predates the gate; the release pair was
+created once, from the commit that adopted the gate:
 
-    git branch main
+    git branch -m master main
     git branch dev
     git push -u origin main dev
+
+`origin/master` is left where it was, so the URLs in `README.md` keep resolving.
+Change the default branch on GitHub from `master` to `main`, then delete
+`origin/master` when convenient; nothing in the gate depends on it.
 
 ## What the inspector asserts
 
