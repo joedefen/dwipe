@@ -1,21 +1,25 @@
 # dwipe: working on the source tree
 
-This is the developer companion to [`README.md`](README.md), which documents the
-tool for its users. Here we document the two things a maintainer needs and a
-user does not: the **test gate** and the **release gate** (`./bless`).
+This is the developer companion to [`README.md`](../README.md), which documents
+the tool for its users. Here we document the two things a maintainer needs and
+a user does not: the **test gate** and the **release gate** (`./bless`).
+
+The file sits inside the package so it ships with the source and is found next
+to the modules it describes; every path below is therefore relative to
+`dwipe/`, and the commands are written to be run from the repository root.
 
 ## Layout and single sources of truth
 
 | Path | Owns |
 | --- | --- |
-| [`dwipe/__init__.py`](dwipe/__init__.py) | `__version__`, and nothing else. The build backend reads it, `dwipe --version` prints it, `bless` reads the line without importing the package. |
-| [`pyproject.toml`](pyproject.toml) | Name, description, keywords, `requires-python`, runtime dependencies, the SPDX `license` and `license-files`, the `test`/`dev` extras, and the pytest, coverage and ruff configuration. |
-| [`bless`](bless) | The release gate. Copied verbatim from `pwr-tray`/`my-snaps`; it holds no copy of this project's identity. |
-| [`tests/inspect_dist.py`](tests/inspect_dist.py) | The distribution inspector. `bless` refuses to upload a wheel and sdist it has not inspected with this file. |
-| [`runner`](runner) | Runs the tree from source (`python -m dwipe.main`) for debugging. |
-| [`linter`](linter) | The advisory pylint run for one file, with the project root on `sys.path`. |
-| [`.github/workflows/tests.yml`](.github/workflows/tests.yml) | CI: tests with the coverage floor on Python 3.10 -- 3.13, ruff plus the blocking pylint error classes, and a packaging job that builds, inspects and smoke-installs the wheel. |
-| [`.gitignore`](.gitignore) | Keeps gate artifacts (`build/`, `dist/`, `.coverage*`, caches, `*.whl`, `*.tar.gz`) out of `git status`, because the gate refuses a dirty tree. |
+| [`dwipe/__init__.py`](../dwipe/__init__.py) | `__version__`, and nothing else. The build backend reads it, `dwipe --version` prints it, `bless` reads the line without importing the package. |
+| [`pyproject.toml`](../pyproject.toml) | Name, description, keywords, `requires-python`, runtime dependencies, the SPDX `license` and `license-files`, the `test`/`dev` extras, and the pytest, coverage and ruff configuration. |
+| [`bless`](../bless) | The release gate. Copied verbatim from `pwr-tray`/`my-snaps`; it holds no copy of this project's identity. |
+| [`tests/inspect_dist.py`](../tests/inspect_dist.py) | The distribution inspector. `bless` refuses to upload a wheel and sdist it has not inspected with this file. |
+| [`runner`](../runner) | Runs the tree from source (`python -m dwipe.main`) for debugging. |
+| [`linter`](../linter) | The advisory pylint run for one file, with the project root on `sys.path`. |
+| [`.github/workflows/tests.yml`](../.github/workflows/tests.yml) | CI: tests with the coverage floor on Python 3.10 -- 3.13, ruff plus the blocking pylint error classes, and a packaging job that builds, inspects and smoke-installs the wheel. |
+| [`.gitignore`](../.gitignore) | Keeps gate artifacts (`build/`, `dist/`, `.coverage*`, caches, `*.whl`, `*.tar.gz`) out of `git status`, because the gate refuses a dirty tree. |
 
 The version lives in exactly one place. `pyproject.toml` declares
 `dynamic = ["version"]`, so flit reads `dwipe/__init__.py`; a `X.Y.Z.99.N`
@@ -61,9 +65,9 @@ which is *not* part of the bless gate: the gate is the release requirement, and
 the full pylint run (`./linter <file>`) is the stricter house-style check.
 
 `dwipe --version` is answered before the config file, the root re-run and the
-curses screen are touched
-([`main()`](dwipe/main.py:18)), because the smoke stage of the release gate runs
-it as an ordinary user on a machine with no saved state.
+curses screen are touched ([`main()`](../dwipe/main.py:18)), because the smoke
+stage of the release gate runs it as an ordinary user on a machine with no
+saved state.
 
 ## The release gate: `./bless`
 
@@ -88,8 +92,7 @@ again. Enter, `quit` or Ctrl-C stops with nothing tagged, uploaded or pushed.
 6. **check** -- `twine check --strict` on both files.
 7. **smoke** -- installs the built wheel into a throwaway venv and runs
    `dwipe --version`, which must print the version being released. This is why
-   the console script answers `--version`
-   ([`main()`](dwipe/main.py:18)).
+   the console script answers `--version` ([`main()`](../dwipe/main.py:18)).
 8. **branch plan** -- refuses a detached HEAD, a third branch, diverged
    `main`/`dev`, or a push that would not fast-forward.
 
@@ -136,8 +139,8 @@ Change the default branch on GitHub from `master` to `main`, then delete
 
 ## What the inspector asserts
 
-[`tests/inspect_dist.py`](tests/inspect_dist.py) is the one implementation, used
-by `bless` and by the CI packaging job; expectations are read from
+[`tests/inspect_dist.py`](../tests/inspect_dist.py) is the one implementation,
+used by `bless` and by the CI packaging job; expectations are read from
 `pyproject.toml` and the package, never from the artifact under test.
 
 * **wheel** -- `Name`, `Version`, `Summary`, `Requires-Python`, `Keywords`,
@@ -157,7 +160,7 @@ Run it by hand on any built pair:
 
 ## Releasing, in three steps
 
-1. Bump `__version__` in [`dwipe/__init__.py`](dwipe/__init__.py) and commit.
+1. Bump `__version__` in [`dwipe/__init__.py`](../dwipe/__init__.py) and commit.
 2. Run `./bless`. The gate runs in full.
 3. Answer `test` to rehearse on TestPyPI, then run `./bless` again and answer
    `publish` -- or go straight to `publish`.
@@ -167,7 +170,7 @@ the tagged commit. Everything else about the release is one of the stages above.
 
 ## Notes on this adoption
 
-* [`bless`](bless) was copied byte-for-byte from `../pwr-tray/bless` (SHA-256
+* [`bless`](../bless) was copied byte-for-byte from `../pwr-tray/bless` (SHA-256
   `4f756337840b0619fbf6f077b00d4bb3fb9aee95ff18bbeb6a0521d39d52131e`) and is
   not edited here: reuse is "copy verbatim", and any later upstream change is
   adopted as a new copy.
@@ -178,6 +181,6 @@ the tagged commit. Everything else about the release is one of the stages above.
   `license-files` at the same time, which is why the build backend floor is
   `flit_core>=3.12`.
 * The ruff rule set was added with the gate, so the whole tree was brought to a
-  clean `ruff check .` once. `tests/test_bless.py` and
-  `tests/test_repo_hygiene.py` keep the gate, the inspector and the single
-  version location from drifting.
+  clean `ruff check .` once. [`tests/test_bless.py`](../tests/test_bless.py) and
+  [`tests/test_repo_hygiene.py`](../tests/test_repo_hygiene.py) keep the gate,
+  the inspector and the single version location from drifting.

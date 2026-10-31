@@ -38,7 +38,8 @@
 # replaced.  `test` rehearses on test.pypi.org with a throwaway X.Y.Z.99.N
 # built from a copy of the tree; `publish` makes `main` and `dev` one commit,
 # tags it vX.Y.Z, uploads the two inspected files to PyPI and pushes.  See
-# README-DEV.md for the stages, the credentials and the release checklist.
+# dwipe/README-DEV.md for the stages, the credentials and the release
+# checklist.
 
 [build-system]
 # 3.12 is the first flit_core release that understands the PEP 639 `license`

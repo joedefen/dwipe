@@ -11,6 +11,8 @@ from pathlib import Path
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
+# The developer companion lives inside the package it describes.
+DEV_DOC = ROOT / 'dwipe' / 'README-DEV.md'
 VERSION_VALUE = re.compile(r"""^__version__ = ['"]([^'"]+)['"]""", re.MULTILINE)
 
 
@@ -72,7 +74,7 @@ def test_the_coverage_gate_is_wired_and_cannot_quietly_disappear():
     """The suite reports coverage and CI enforces a floor."""
     assert '--cov=dwipe' in workflow()
     assert '--cov-fail-under=40' in workflow()
-    assert '--cov=dwipe' in (ROOT / 'README-DEV.md').read_text(encoding='utf-8')
+    assert '--cov=dwipe' in DEV_DOC.read_text(encoding='utf-8')
     assert '.coverage' in (ROOT / '.gitignore').read_text(encoding='utf-8').splitlines()
 
 
@@ -81,8 +83,8 @@ def test_the_release_gate_exists_and_the_documents_name_it():
     assert gate.is_file(), 'the release gate is missing'
     assert gate.stat().st_mode & 0o111, './bless must be executable'
 
-    for document in ('README.md', 'README-DEV.md'):
-        text = (ROOT / document).read_text(encoding='utf-8')
+    for document in (ROOT / 'README.md', DEV_DOC):
+        text = document.read_text(encoding='utf-8')
         assert 'bless' in text, document
         assert './release' not in text, document
 
@@ -110,7 +112,7 @@ def test_no_documented_command_uploads_the_whole_dist_directory():
 
 def test_the_documents_describe_the_testpypi_rehearsal():
     """Answering `test` at the prompt is documented, not tribal knowledge."""
-    readme = (ROOT / 'README-DEV.md').read_text(encoding='utf-8')
+    readme = DEV_DOC.read_text(encoding='utf-8')
     assert '====> Enter test or publish or quit:' in readme
     assert 'test.pypi.org' in readme
     assert 'TWINE_TESTPYPI_PASSWORD' in readme

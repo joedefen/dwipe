@@ -580,11 +580,11 @@ sudo hdparm --user-master u --security-disable NULL /dev/sdX
 ### Contributing
 Issues and pull requests welcome at [github.com/joedefen/dwipe](https://github.com/joedefen/dwipe)
 
-To work on the source tree, see [README-DEV.md](README-DEV.md): it documents the
-virtualenv + `dev` extra, the test gate (`ruff`, `compileall`, `pytest --cov`),
-and `./bless`, the only path to a release -- a single command that runs every
-gate, rehearses on TestPyPI when asked to, and tags, uploads and pushes only
-when asked to.
+To work on the source tree, see
+[dwipe/README-DEV.md](dwipe/README-DEV.md): it documents the virtualenv + `dev`
+extra, the test gate (`ruff`, `compileall`, `pytest --cov`), and `./bless`, the
+only path to a release -- a single command that runs every gate, rehearses on
+TestPyPI when asked to, and tags, uploads and pushes only when asked to.
 
 ## License
 
