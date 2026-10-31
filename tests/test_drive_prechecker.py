@@ -2,9 +2,8 @@
 import json
 from types import SimpleNamespace
 
-import pytest
-
 import dwipe.DrivePreChecker as dpc
+import pytest
 from dwipe.DrivePreChecker import DrivePreChecker, PreCheckResult
 
 

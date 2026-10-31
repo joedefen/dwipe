@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-import subprocess
 import json
+import subprocess
 from dataclasses import dataclass
+
 from .SataTool import SataTool
 from .Utils import Utils
+
 
 @dataclass
 class PreCheckResult:

@@ -7,9 +7,8 @@ import io
 import time
 from types import SimpleNamespace
 
-import pytest
-
 import dwipe.DeviceWorker as dwmod
+import pytest
 from dwipe.DeviceWorker import DeviceWorker, DeviceWorkerManager, ProbeState
 
 

@@ -5,6 +5,7 @@ PersistentState class for saving user preferences and device states
 import json
 import time
 from pathlib import Path
+
 from .Utils import Utils
 
 
@@ -63,7 +64,7 @@ class PersistentState:
                 # Remember valid keys from default state
                 valid_keys = set(self.state.keys())
 
-                with open(self.config_path, 'r', encoding='utf-8') as f:
+                with open(self.config_path, encoding='utf-8') as f:
                     loaded = json.load(f)
 
                     # Only load keys that exist in current schema
@@ -87,7 +88,7 @@ class PersistentState:
                             self.state['wipe_mode'] = '-V'
                         self.dirty = True  # Save the migration
 
-            except (json.JSONDecodeError, IOError) as e:
+            except (OSError, json.JSONDecodeError) as e:
                 print(f'Warning: Could not load state from {self.config_path}: {e}')
 
     def save(self):
@@ -104,7 +105,7 @@ class PersistentState:
             # Fix ownership if running with sudo
             Utils.fix_file_ownership(self.config_path)
             self.dirty = False
-        except IOError as e:
+        except OSError as e:
             print(f'Warning: Could not save state to {self.config_path}: {e}')
 
     def _cleanup_old_devices(self):

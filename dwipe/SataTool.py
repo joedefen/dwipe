@@ -5,14 +5,16 @@
 # pylint: disable=too-many-locals,too-many-instance-attributes
 # pylint: disable=too-many-boolean-expressions
 
-import os
 import json
-import subprocess
+import os
 import re
+import subprocess
 import time
 from types import SimpleNamespace
-from .Utils import Utils
+
 from .Tunables import Tunables
+from .Utils import Utils
+
 
 class WipeIpDb:
     """Manages the persistent state of in-progress firmware wipes."""
@@ -30,7 +32,7 @@ class WipeIpDb:
     def _read_dict(self):
         try:
             now = time.time()
-            with open(self.path, 'r', encoding='utf-8') as f:
+            with open(self.path, encoding='utf-8') as f:
                 data, cleaned = json.load(f), {}
                 for key, unixtime in data.items():
                     if now - unixtime <= 7 * 24 * 3600:
@@ -96,7 +98,7 @@ class SataTool:
         # 1. Get Model from sysfs (Fast and Safe)
         model_path = f"/sys/class/block/{dev_name}/device/model"
         try:
-            with open(model_path, 'r', encoding='utf-8') as f:
+            with open(model_path, encoding='utf-8') as f:
                 model = f.read().strip()
         except OSError as e:
             Utils.get_logger().debug(f"model read failed for {dev_name}: {e}")
@@ -312,7 +314,8 @@ class SataTool:
         # 2. Set the Security Password
         # This moves the drive from 'not enabled' to 'enabled'
         set_pass_argv = ['hdparm'] + ['--user-master', 'u', '--security-set-pass', password]
-        if db: print(f"Setting security password for {self.device_name}...")
+        if db:
+            print(f"Setting security password for {self.device_name}...")
         res = self.run_cmd(['--user-master', 'u', '--security-set-pass', password])
 
         # Record command execution
@@ -359,7 +362,8 @@ class SataTool:
                     secures.locked or secures.enabled
                     ) and self.wipe_ip_db.purge(self.model_serial_key):
 
-            if db: print(f"Attempting rescue on locked device {self.device_name}...")
+            if db:
+                print(f"Attempting rescue on locked device {self.device_name}...")
             if secures.locked:
                 # 1. Unlock
                 self.run_cmd(['--user-master', 'u', '--security-unlock', password])
@@ -460,8 +464,8 @@ class SataTool:
 def main():
     """ TBD"""
     # pylint: disable=import-outside-toplevel
-    import glob
     import argparse
+    import glob
     parser = argparse.ArgumentParser()
     parser.add_argument('--wipe', action='store_true',
                         help='firmware wipe of given disk')

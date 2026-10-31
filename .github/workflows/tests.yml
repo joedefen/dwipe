@@ -25,6 +25,8 @@ jobs:
           pip install -e '.[test]'
 
       - name: Run unit tests with coverage
+        # The same command `./bless` runs, so a green gate means the same thing
+        # in both places.
         run: pytest --cov=dwipe --cov-report=term-missing --cov-fail-under=40
 
   lint:
@@ -37,11 +39,56 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install pylint
-        run: python -m pip install --upgrade pip pylint
+      - name: Install the dev extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Ruff (the gate `./bless` runs)
+        # The rule set is pinned in pyproject.toml, so a developer's global
+        # configuration cannot change what CI enforces.
+        run: python -m ruff check .
 
       - name: Static checks (undefined names / bad calls)
         # Full advisory lint is available locally via ./linter. This job blocks
         # only on the error classes that indicate real bugs (undefined name,
         # bad call signature) and currently passes at 10.00/10.
-        run: pylint --disable=all --enable=E0601,E0602,E0603,E1120,E1121 dwipe
+        run: |
+          python -m pip install --upgrade pylint
+          pylint --disable=all --enable=E0601,E0602,E0603,E1120,E1121 dwipe
+
+  packaging:
+    # The same stages, in the same order, that `./bless` runs before it asks
+    # what to do: build into a fresh directory, inspect the two files with the
+    # shared inspector, `twine check --strict`, then install the wheel in a
+    # scratch virtualenv and run it. No credentials: this job never uploads.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the dev extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Build
+        run: python -m build --outdir build/ci-dist
+
+      - name: Inspect the wheel and sdist
+        run: python tests/inspect_dist.py build/ci-dist/*.whl build/ci-dist/*.tar.gz
+
+      - name: twine check --strict
+        run: python -m twine check --strict build/ci-dist/*.whl build/ci-dist/*.tar.gz
+
+      - name: Smoke install and run the console script
+        run: |
+          python -m venv build/ci-smoke
+          build/ci-smoke/bin/python -m pip install --upgrade pip
+          build/ci-smoke/bin/python -m pip install build/ci-dist/*.whl
+          build/ci-smoke/bin/dwipe --version
+          build/ci-smoke/bin/dwipe --help

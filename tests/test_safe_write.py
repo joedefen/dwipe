@@ -16,10 +16,10 @@ from types import SimpleNamespace
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from device_double import FakeDeviceIO  # noqa: E402
-
 from dwipe import device_io  # noqa: E402
 from dwipe.WriteTask import WriteZeroTask  # noqa: E402
+
+from device_double import FakeDeviceIO  # noqa: E402
 
 CHUNK = 4096
 DEVICE_PATH = "/dev/loop0"

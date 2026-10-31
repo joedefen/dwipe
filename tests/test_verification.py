@@ -8,10 +8,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from device_double import FakeDeviceIO  # noqa: E402
-
 from dwipe import verification  # noqa: E402
 from dwipe.WipeTask import WipeTask  # noqa: E402
+
+from device_double import FakeDeviceIO  # noqa: E402
 
 MARKER_SIZE = WipeTask.MARKER_SIZE
 SECTION_SIZE = 24000  # enough samples per section to satisfy the >200-unique rule

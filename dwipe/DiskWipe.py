@@ -6,28 +6,38 @@ DiskWipe class - Main application controller/singleton
 # pylint: disable=too-many-branches,too-many-statements,too-many-locals
 # pylint: disable=protected-access,too-many-return-statements
 # pylint: disable=too-few-public-methods
-import os
-import sys
-import subprocess
-import re
-import time
-import threading
+import curses as cs
+
 # import shutil
 import json
-import curses as cs
-from types import SimpleNamespace
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
 from datetime import datetime
-from console_window import (ConsoleWindow, ConsoleWindowOpts, OptionSpinner,
-            IncrementalSearchBar, InlineConfirmation, Theme,
-            Screen, ScreenStack, Context)
+from types import SimpleNamespace
 
-from .WipeJob import WipeJob
+from console_window import (
+    ConsoleWindow,
+    ConsoleWindowOpts,
+    Context,
+    IncrementalSearchBar,
+    InlineConfirmation,
+    OptionSpinner,
+    Screen,
+    ScreenStack,
+    Theme,
+)
+
+from .DeviceChangeMonitor import DeviceChangeMonitor
 from .DeviceInfo import DeviceInfo
 from .DeviceWorker import ProbeState
-from .Utils import Utils
 from .PersistentState import PersistentState
 from .StructuredLogger import StructuredLogger
-from .DeviceChangeMonitor import DeviceChangeMonitor
+from .Utils import Utils
+from .WipeJob import WipeJob
 
 
 def _restore_terminal():
@@ -144,9 +154,13 @@ class DiskWipe:
                 command_args = DrivePreChecker.get_wipe_command_args(wipe_type)
 
                 # Import firmware task classes
-                from .FirmwareWipeTask import (NvmeWipeTask, SataWipeTask,
-                                               StandardPrecheckTask,
-                                               FirmwarePreVerifyTask, FirmwarePostVerifyTask)
+                from .FirmwareWipeTask import (
+                    FirmwarePostVerifyTask,
+                    FirmwarePreVerifyTask,
+                    NvmeWipeTask,
+                    SataWipeTask,
+                    StandardPrecheckTask,
+                )
 
                 # Determine task type based on device name
                 if part.name.startswith('nvme'):
@@ -1033,9 +1047,9 @@ class MainScreen(DiskWipeScreen):
             if app.confirmation.active and app.confirmation.identity == partition.name:
                 # Build confirmation message
                 if app.confirmation.action_type == 'wipe':
-                    msg = f'⚠️ WIPE'
+                    msg = '⚠️ WIPE'
                 else:  # verify
-                    msg = f'⚠️ VERIFY [writes marker]'
+                    msg = '⚠️ VERIFY [writes marker]'
 
                 # Add mode-specific prompt (base message without input)
                 if app.confirmation.mode == 'yes':
@@ -1296,7 +1310,7 @@ class MainScreen(DiskWipeScreen):
             # Check if this is an NVMe controller (class 0x010802)
             class_file = os.path.join(device_path, 'class')
             try:
-                with open(class_file, 'r', encoding='utf-8') as f:
+                with open(class_file, encoding='utf-8') as f:
                     device_class = f.read().strip()
                 if device_class != '0x010802':
                     continue

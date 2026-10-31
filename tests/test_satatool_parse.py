@@ -6,7 +6,6 @@ touches the real system) and exercise the pure regex-based parsing.
 from types import SimpleNamespace
 
 import pytest
-
 from dwipe.SataTool import SataTool
 
 

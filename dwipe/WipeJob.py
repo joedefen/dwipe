@@ -4,21 +4,20 @@ WipeJob class for handling disk/partition wiping operations
 Orchestrates task sequences (write and verify operations).
 """
 # pylint: disable=broad-exception-raised,broad-exception-caught
-import os
-import time
-import threading
-import random
-import traceback
 import mmap
+import os
+import random
+import threading
+import time
+import traceback
 from types import SimpleNamespace
 
-from . import device_io
-from . import markers
-from .Utils import Utils
-from .WipeTask import WipeTask
-from .WriteTask import WriteTask, WriteZeroTask, WriteRandTask
-from .VerifyTask import VerifyTask, VerifyZeroTask, VerifyRandTask
+from . import device_io, markers
 from .FirmwareWipeTask import FirmwareWipeTask
+from .Utils import Utils
+from .VerifyTask import VerifyRandTask, VerifyTask, VerifyZeroTask
+from .WipeTask import WipeTask
+from .WriteTask import WriteRandTask, WriteTask, WriteZeroTask
 
 
 class WipeJob:
@@ -32,7 +31,7 @@ class WipeJob:
     def _get_dirty_kb():
         """Read Dirty pages from /proc/meminfo (in KB)"""
         try:
-            with open('/proc/meminfo', 'r', encoding='utf-8') as f:
+            with open('/proc/meminfo', encoding='utf-8') as f:
                 for line in f:
                     if line.startswith('Dirty:'):
                         return int(line.split()[1])
@@ -44,7 +43,7 @@ class WipeJob:
     def _get_total_memory_mb():
         """Read total system memory from /proc/meminfo (in MB)"""
         try:
-            with open('/proc/meminfo', 'r', encoding='utf-8') as f:
+            with open('/proc/meminfo', encoding='utf-8') as f:
                 for line in f:
                     if line.startswith('MemTotal:'):
                         # Value is in KB, convert to MB

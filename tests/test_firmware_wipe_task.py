@@ -5,8 +5,7 @@ methods or the base class. Firmware erase commands are never run.
 """
 from types import SimpleNamespace
 
-from dwipe.FirmwareWipeTask import (FirmwareWipeTask, NvmeWipeTask,
-                                    SataWipeTask)
+from dwipe.FirmwareWipeTask import FirmwareWipeTask, NvmeWipeTask, SataWipeTask
 
 
 def make_base(wipe_name="Test", command_args="cmd"):

@@ -11,10 +11,9 @@ import time
 import traceback
 from types import SimpleNamespace
 
-from . import device_io
-from . import verification
-from .WipeTask import WipeTask
+from . import device_io, verification
 from .Utils import Utils
+from .WipeTask import WipeTask
 
 
 class VerifyTask(WipeTask):

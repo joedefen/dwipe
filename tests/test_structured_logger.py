@@ -3,7 +3,6 @@ import json
 from datetime import datetime, timedelta
 
 import pytest
-
 from dwipe.StructuredLogger import LogEntry, StructuredLogger
 
 

@@ -1,11 +1,12 @@
 """
 Utils class - Utility functions for dwipe
 """
-import os
-import sys
-import pwd
 import datetime
+import os
+import pwd
+import sys
 from pathlib import Path
+
 from .StructuredLogger import StructuredLogger
 
 
@@ -130,7 +131,7 @@ class Utils:
             if not log_path.exists():
                 return
 
-            with open(log_path, 'r', encoding='utf-8') as f:
+            with open(log_path, encoding='utf-8') as f:
                 lines = f.readlines()
 
             if len(lines) > max_lines:
@@ -276,7 +277,7 @@ class Utils:
             status_str = '100%'
         elif result in ('OK', 'FAIL', 'skip'):
             # For verify operations: show 100% and the result
-            status_str = f'100%'
+            status_str = '100%'
         elif pct is not None:
             status_str = f'{pct:3d}%'
         else:
@@ -385,8 +386,8 @@ class ClipboardHelper:
     3. If DISPLAY set -> try xclip, then xsel
     4. Fallback -> terminal mode (manual copy)
     """
-    import subprocess
     import shutil
+    import subprocess
 
     # Singleton instance for caching probe results
     _instance = None
@@ -459,8 +460,8 @@ class ClipboardHelper:
             tuple: (success: bool, error_message: str or None)
         """
         cls._probe()
-        import subprocess
         import base64
+        import subprocess
 
         # Try OSC 52 escape sequence (works over SSH with supporting terminals)
         if cls._use_osc52:

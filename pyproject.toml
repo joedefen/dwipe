@@ -1,21 +1,80 @@
+# dwipe -- packaging, the test gate and the release gate
+# ======================================================
+#
+# Sources of truth
+# ----------------
+# * Build backend: flit_core.  The release number lives in
+#   `dwipe/__init__.py:__version__` only; never add `version =` to [project].
+#   tests/test_repo_hygiene.py enforces this, because a second copy of the
+#   version is how published metadata drifts away from the code.
+# * Layout: the package is `dwipe/` at the root and `dwipe` is the console
+#   script (dwipe.main:main).  `./runner` runs the same tree straight from
+#   source for debugging.
+#
+# The gates
+# ---------
+# CI and `./bless` run the same three commands, on the interpreter that holds
+# the dev extra -- not equivalents, so a green gate means the same thing in
+# both places:
+#
+#   python -m ruff check .
+#   python -m compileall -q dwipe tests
+#   python -m pytest -q --cov=dwipe --cov-report=term-missing
+#
+# Install the toolchain into the checkout's virtualenv, which is also the
+# interpreter `./bless` must run under:
+#
+#   python3 -m venv .venv
+#   .venv/bin/python -m pip install -e '.[dev]'
+#
+# Releasing
+# ---------
+# `./bless` is the only path to an upload and it takes no argument and no flag:
+# every run runs the whole gate, prints what it is holding, and only then asks
+# `====> Enter test or publish or quit:`.  The answer decides the irreversible
+# part, so it must not also be able to skip the careful part.  Every run reads
+# the JSON index the answer would write to before anything is built, and
+# refuses a version that is already published, because an upload cannot be
+# replaced.  `test` rehearses on test.pypi.org with a throwaway X.Y.Z.99.N
+# built from a copy of the tree; `publish` makes `main` and `dev` one commit,
+# tags it vX.Y.Z, uploads the two inspected files to PyPI and pushes.  See
+# README-DEV.md for the stages, the credentials and the release checklist.
+
 [build-system]
-requires = ["flit_core>=3.4"]
+# 3.12 is the first flit_core release that understands the PEP 639 `license`
+# expression and `license-files` keys used in the `[project]` table below.
+# The upper bound matters: flit_core 4.x writes Metadata 2.5, which only
+# twine >= 7 and packaging >= 26 accept -- exactly the floors the `dev` extra
+# and `./bless` declare.
+requires = ["flit_core>=3.12,<5"]
 build-backend = "flit_core.buildapi"
 
 [project]
 name = "dwipe"
-version = "3.1.0"
+# The release number lives in `dwipe/__init__.py` (`__version__`).  This table
+# only declares where it comes from, so `bless`, the built artifacts and
+# `dwipe --version` all report the same string.
+dynamic = ["version"]
 description = "A tool to wipe disks and partitions for Linux"
 authors = [
     { name = "Joe Defen", email = "joedef@google.com" }
 ]
 readme = "README.md"
-license = { text = "MIT" }
+# PEP 639: an SPDX expression plus the file it refers to.  The old
+# `License :: OSI Approved :: MIT License` classifier is deliberately gone --
+# Metadata 2.4 and later carry License-Expression, and declaring both invites
+# them to disagree.
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 keywords = ["disk", "partition", "wipe", "clean", "scrub"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: POSIX :: Linux"
 ]
 dependencies = [
@@ -23,9 +82,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The minimum a contributor needs to run the suite (what CI installs on every
+# supported Python).
 test = [
     'pytest >= 7.0',
     'pytest-cov >= 4.0',
+]
+# The release toolchain.  `./bless` refuses to start unless `twine` and
+# `packaging` meet its own floors (`twine>=7`, `packaging>=26`), so declaring
+# the same floors here means the extra always installs a toolchain the release
+# gate accepts.
+dev = [
+    'pytest >= 7.0',
+    'pytest-cov >= 4.0',
+    'ruff >= 0.9',
+    'build >= 1.2',
+    'twine >= 7',
+    'packaging >= 26',
 ]
 
 [project.urls]
@@ -35,15 +108,42 @@ test = [
 [project.scripts]
 dwipe = "dwipe.main:main"
 
+# No [tool.bless] table is needed: the defaults line up with this project.
+# `./bless` reads the distribution name from `[project] name` ("dwipe"), the
+# package holding `__version__` from that name with `-` and `.` turned into
+# `_` ("dwipe"), the console script from the first `[project.scripts]` entry
+# ("dwipe") and the inspector from `tests/inspect_dist.py`.  Only a project
+# that differs from those defaults needs `module`, `inspect`, `smoke_args` or
+# `smoke_expect` written down here.
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra"
 
+[tool.ruff]
+# Keep Ruff deterministic instead of inheriting a developer's global
+# configuration: the gate CI runs and the gate `./bless` runs have to be the
+# same gate.  3.10 is the oldest interpreter `requires-python` allows.
+target-version = "py310"
+line-length = 120
+src = ["dwipe", "tests"]
+extend-exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+# Small, high-signal set: pycodestyle errors, Pyflakes, import sorting,
+# pyupgrade and bugbear.  Formatting-only rules are intentionally excluded, so
+# `ruff check` never argues about layout this codebase already settled.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
 [tool.coverage.run]
+# src pins the measured package no matter which directory pytest is started
+# from, so the number the release gate prints is reproducible.
 source = ["dwipe"]
 omit = ["tests/*"]
 
 [tool.coverage.report]
+# Measured well above this; the floor is a ratchet against new code arriving
+# without a test, not a target to optimise.  Raise it when the number rises.
 fail_under = 40
 show_missing = true

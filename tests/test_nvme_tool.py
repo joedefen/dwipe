@@ -7,7 +7,6 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
-
 from dwipe.NvmeTool import NvmeTool
 from dwipe.Utils import Utils
 

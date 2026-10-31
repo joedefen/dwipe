@@ -6,7 +6,6 @@ state-inference logic used to decide whether a device may be wiped.
 from types import SimpleNamespace
 
 import pytest
-
 from dwipe.DeviceInfo import DeviceInfo
 from dwipe.DeviceWorker import ProbeState
 

@@ -7,7 +7,6 @@ the O_DIRECT flag construction) was unverified.
 import os
 
 import pytest
-
 from dwipe import device_io
 from dwipe.device_io import PosixDeviceIO
 

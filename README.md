@@ -52,7 +52,7 @@
 ## Installation
 
 * **Recommended (using pipx):** `pipx install dwipe`
-* **Verify installation:** `dwipe --help`
+* **Verify installation:** `dwipe --version` (prints the release number) and `dwipe --help`
 * **Uninstall:** `pipx uninstall dwipe`
 
 ## Quick Start (please READ THIS, at least)
@@ -130,6 +130,7 @@ Simply run `dwipe` from the command line without arguments: `dwipe`
   - The block is remembered per device; once you unblock, it stays unblocked
   - Set to `off` when re-provisioning many encrypted disks to avoid unblocking each one
 - `--dump-lsblk` - Dump parsed device information and exit (for debugging)
+- `--version` - Print the version and exit (works without root, like `--help`)
 - `--help` - Show help message with all available options
 
 ### Color Legend
@@ -578,6 +579,12 @@ sudo hdparm --user-master u --security-disable NULL /dev/sdX
 
 ### Contributing
 Issues and pull requests welcome at [github.com/joedefen/dwipe](https://github.com/joedefen/dwipe)
+
+To work on the source tree, see [README-DEV.md](README-DEV.md): it documents the
+virtualenv + `dev` extra, the test gate (`ruff`, `compileall`, `pytest --cov`),
+and `./bless`, the only path to a release -- a single command that runs every
+gate, rehearses on TestPyPI when asked to, and tags, uploads and pushes only
+when asked to.
 
 ## License
 

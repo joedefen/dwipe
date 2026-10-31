@@ -1,7 +1,7 @@
 """Unit tests for the statistical verification logic in dwipe.VerifyTask."""
 from types import SimpleNamespace
 
-from dwipe.VerifyTask import VerifyTask, VerifyZeroTask, VerifyRandTask
+from dwipe.VerifyTask import VerifyRandTask, VerifyZeroTask
 
 
 def make_task(cls=VerifyZeroTask, verify_pct=2):

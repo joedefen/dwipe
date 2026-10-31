@@ -13,13 +13,13 @@ from types import SimpleNamespace
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from device_double import FakeDeviceIO  # noqa: E402
-
 from dwipe import device_io, markers  # noqa: E402
+from dwipe.VerifyTask import VerifyRandTask, VerifyZeroTask  # noqa: E402
 from dwipe.WipeJob import WipeJob  # noqa: E402
 from dwipe.WipeTask import WipeTask  # noqa: E402
-from dwipe.WriteTask import WriteZeroTask, WriteRandTask  # noqa: E402
-from dwipe.VerifyTask import VerifyZeroTask, VerifyRandTask  # noqa: E402
+from dwipe.WriteTask import WriteRandTask, WriteZeroTask  # noqa: E402
+
+from device_double import FakeDeviceIO  # noqa: E402
 
 MARKER_SIZE = WipeTask.MARKER_SIZE
 

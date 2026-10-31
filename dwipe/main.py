@@ -12,17 +12,23 @@ import os
 import sys
 import traceback
 
+from . import __version__
 from .DiskWipe import DiskWipe
-from .DeviceInfo import DeviceInfo
-from .Utils import Utils
-from .Prereqs import Prereqs
 from .PersistentState import PersistentState
+from .Prereqs import Prereqs
+from .Utils import Utils
 
 
 def main():
     """Main entry point"""
     import argparse
-    from pathlib import Path
+
+    # `--version` answers before the config file, the root re-run and the curses
+    # screen: it is the smoke check `./bless` runs on the wheel it just built,
+    # and it has to work as an ordinary user on a machine with no saved state.
+    if '--version' in sys.argv[1:]:
+        print(f'dwipe {__version__}')
+        return
 
     # Load persistent state first so we can use previous values as defaults
     config_dir = Utils.get_config_dir()

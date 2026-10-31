@@ -11,17 +11,16 @@ Includes:
 # pylint: disable=too-many-positional-arguments,consider-using-with
 # pylint: disable=too-many-return-statements
 import os
-import time
 import random
 import subprocess
+import time
 import traceback
 
-from . import device_io
-from . import markers
-from .WipeTask import WipeTask
-from .Utils import Utils
-from .SataTool import SataTool
+from . import device_io, markers
 from .NvmeTool import NvmeTool
+from .SataTool import SataTool
+from .Utils import Utils
+from .WipeTask import WipeTask
 
 
 class FirmwareWipeTask(WipeTask):
@@ -618,7 +617,7 @@ class FirmwarePreVerifyTask(WipeTask):
 
             # Generate pseudo-random test data
             random.seed(int(time.time()))
-            for i in range(self.NUM_BLOCKS):
+            for _ in range(self.NUM_BLOCKS):
                 block = bytes([random.randint(0, 255) for _ in range(self.BLOCK_SIZE)])
                 self.original_blocks.append(block)
 

@@ -3,14 +3,14 @@
 Structured Logger with JSON Lines format and weighted-age trimming.
 ERR entries age 10x slower than other entries, so they persist longer.
 """
+import inspect
+import json
 import os
 import sys
-import json
-import inspect
-from pathlib import Path
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from dataclasses import dataclass, asdict, field
-from typing import Optional, List, Dict, Any
+from pathlib import Path
+from typing import Any
 
 # ============================================================================
 # Data Classes for Structured Logging
@@ -26,11 +26,11 @@ class LogEntry:
     function: str
     module: str = ""
     message: str = ""
-    data: Dict[str, Any] = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
     session_id: str = ""
     _raw: str = ""  # Original raw message
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         result = asdict(self)
         # Remove private fields
@@ -38,7 +38,7 @@ class LogEntry:
         return result
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> 'LogEntry':
+    def from_dict(data: dict[str, Any]) -> 'LogEntry':
         """Safely create LogEntry from dict, filtering unknown fields."""
         # Only extract known fields to avoid TypeError from extra fields
         known_fields = {
@@ -139,7 +139,7 @@ class StructuredLogger:
     ERR_AGE_WEIGHT = 10  # ERR entries age 10x slower
 
     def __init__(self, app_name: str = 'rmbloat',
-                 log_dir: Optional[Path] = None,
+                 log_dir: Path | None = None,
                  session_id: str = ""):
         """
         Initialize the structured logger.
@@ -171,7 +171,7 @@ class StructuredLogger:
             except (OSError, KeyError):
                 pass  # Ignore permission errors and missing users
 
-    def _setup_paths(self, log_dir: Optional[Path]) -> None:
+    def _setup_paths(self, log_dir: Path | None) -> None:
         """Set up log directory and file paths."""
         try:
             if log_dir:
@@ -214,7 +214,7 @@ class StructuredLogger:
         return ("unknown", 0, "unknown", "")
 
     def _create_log_entry(self, level: str, *args,
-                         data: Optional[Dict] = None,
+                         data: dict | None = None,
                          **kwargs) -> LogEntry:
         """Create a structured log entry."""
         file, line, function, module = self._get_caller_info()
@@ -270,7 +270,7 @@ class StructuredLogger:
         try:
             # Read all entries
             entries = []  # (timestamp, level, line, line_size)
-            with open(self.log_file, 'r', encoding='utf-8') as f:
+            with open(self.log_file, encoding='utf-8') as f:
                 while True:
                     line = f.readline()
                     if not line:
@@ -304,7 +304,7 @@ class StructuredLogger:
             total_size = 0
 
             # Keep newest entries (lowest effective age) until we hit target
-            for effective_age, line, line_size in weighted:
+            for _, line, line_size in weighted:
                 if total_size + line_size <= target_size:
                     kept.append(line)
                     total_size += line_size
@@ -328,12 +328,12 @@ class StructuredLogger:
     # Public API
     # ========================================================================
 
-    def event(self, *args, data: Optional[Dict] = None, **kwargs) -> None:
+    def event(self, *args, data: dict | None = None, **kwargs) -> None:
         """Log an event (successful operation)."""
         entry = self._create_log_entry("OK", *args, data=data, **kwargs)
         self._append_log(entry)
 
-    def error(self, *args, data: Optional[Dict] = None, **kwargs) -> None:
+    def error(self, *args, data: dict | None = None, **kwargs) -> None:
         """Log an error."""
         entry = self._create_log_entry("ERR", *args, data=data, **kwargs)
         self._append_log(entry)
@@ -343,12 +343,12 @@ class StructuredLogger:
         if data:
             print(f"  Data: {json.dumps(data, indent=2)[:200]}...", file=sys.stderr)
 
-    def info(self, *args, data: Optional[Dict] = None, **kwargs) -> None:
+    def info(self, *args, data: dict | None = None, **kwargs) -> None:
         """Log informational message."""
         entry = self._create_log_entry("MSG", *args, data=data, **kwargs)
         self._append_log(entry)
 
-    def debug(self, *args, data: Optional[Dict] = None, **kwargs) -> None:
+    def debug(self, *args, data: dict | None = None, **kwargs) -> None:
         """Log debug message."""
         entry = self._create_log_entry("DBG", *args, data=data, **kwargs)
         self._append_log(entry)
@@ -408,8 +408,8 @@ class StructuredLogger:
     # ========================================================================
 
     @staticmethod
-    def filter_entries(entries: List[LogEntry], pattern: str,
-                      deep: bool = False) -> tuple[List[LogEntry], set]:
+    def filter_entries(entries: list[LogEntry], pattern: str,
+                      deep: bool = False) -> tuple[list[LogEntry], set]:
         """
         Filter log entries by pattern (case-insensitive).
 
@@ -484,7 +484,7 @@ class StructuredLogger:
         file_size = self.log_file.stat().st_size
 
         try:
-            with open(self.log_file, 'r', encoding='utf-8') as f:
+            with open(self.log_file, encoding='utf-8') as f:
                 while True:
                     line = f.readline()
                     if not line:
@@ -537,7 +537,7 @@ class StructuredLogger:
 
         # Read new entries from last position
         try:
-            with open(self.log_file, 'r', encoding='utf-8') as f:
+            with open(self.log_file, encoding='utf-8') as f:
                 f.seek(last_position)
                 while True:
                     line = f.readline()
@@ -572,7 +572,7 @@ class StructuredLogger:
     # ========================================================================
 
     @property
-    def log_paths(self) -> List[str]:
+    def log_paths(self) -> list[str]:
         """Return list of log file paths (for backward compatibility with -L option)."""
         return [str(self.log_file)]
 

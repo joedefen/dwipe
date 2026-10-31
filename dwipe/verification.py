@@ -13,8 +13,8 @@ import os
 import random
 import traceback
 
-from .WipeTask import WipeTask
 from .Utils import Utils
+from .WipeTask import WipeTask
 
 
 def analyze_section_randomness(byte_counts, total_samples):

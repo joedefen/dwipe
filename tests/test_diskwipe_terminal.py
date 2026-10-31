@@ -1,5 +1,4 @@
 """Tests for the shell-free terminal restore helper (audit item 5)."""
-import pytest
 
 from dwipe import DiskWipe
 

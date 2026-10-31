@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 import shutil
 import sys
-import os
-from typing import Optional, Dict, List
+
 
 class Prereqs:
     """Manages tool dependencies and provides actionable install suggestions."""
@@ -29,14 +28,14 @@ class Prereqs:
         # Track status of required tools
         self.results = {}
 
-    def _detect_package_manager(self) -> Optional[str]:
+    def _detect_package_manager(self) -> str | None:
         managers = ['apt', 'dnf', 'yum', 'pacman', 'zypper', 'apk', 'brew']
         for cmd in managers:
             if shutil.which(cmd):
                 return cmd
         return None
 
-    def check_all(self, tools: List[str]):
+    def check_all(self, tools: list[str]):
         """Runs the check for a list of tools."""
         for tool in tools:
             path = shutil.which(tool)

@@ -2,7 +2,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from dwipe.Utils import Utils
 
 

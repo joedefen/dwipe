@@ -8,15 +8,14 @@ Includes:
 """
 # pylint: disable=broad-exception-raised,broad-exception-caught
 import os
-import time
 import subprocess
+import time
 import traceback
 from types import SimpleNamespace
 
-from . import device_io
-from . import markers
-from .WipeTask import WipeTask
+from . import device_io, markers
 from .Utils import Utils
+from .WipeTask import WipeTask
 
 
 class WriteTask(WipeTask):

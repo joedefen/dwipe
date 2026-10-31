@@ -1,13 +1,12 @@
 """
 DeviceChangeMonitor - Background thread for monitoring block device changes
 """
+import ctypes
 import os
 import select
 import threading
 import traceback
-import ctypes
 from ctypes.util import find_library
-
 
 # inotify constants (from Linux headers)
 IN_CREATE = 0x00000100
@@ -153,7 +152,7 @@ class DeviceChangeMonitor:
             current_devs = os.listdir('/sys/class/block')
 
             # 2. Secondary check: Do the partition sizes/counts match?
-            with open('/proc/partitions', 'r', encoding='utf-8') as f:
+            with open('/proc/partitions', encoding='utf-8') as f:
                 current_parts = f.read()
 
             # Create a combined "Fingerprint"

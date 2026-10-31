@@ -6,20 +6,18 @@ DeviceInfo class for device discovery and information management
 # pylint: disable=too-many-return-statements,too-many-nested-blocks
 # pylint: disable=too-many-statements
 
+import curses
 import os
 import re
-import json
-import subprocess
-import curses
 import traceback
 from fnmatch import fnmatch
 from types import SimpleNamespace
-from console_window import Theme
-from dataclasses import asdict
 
-from .Utils import Utils
-from .DrivePreChecker import DrivePreChecker
+from console_window import Theme
+
 from .DeviceWorker import DeviceWorkerManager, ProbeState
+from .DrivePreChecker import DrivePreChecker
+from .Utils import Utils
 
 
 class DeviceInfo:
@@ -209,7 +207,7 @@ class DeviceInfo:
             try:
                 rv = ''
                 fullpath = f'/sys/class/block/{device_name}/device/{suffix}'
-                with open(fullpath, 'r', encoding='utf-8') as f:  # Read information
+                with open(fullpath, encoding='utf-8') as f:  # Read information
                     # Sanitize: some USB bridges return strings with embedded nulls
                     rv = f.read().strip().replace('\x00', '')
             except (FileNotFoundError, Exception):
@@ -240,7 +238,7 @@ class DeviceInfo:
                 parent = device_name
 
             path = f'/sys/block/{parent}/queue/rotational'
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(path, encoding='utf-8') as f:
                 return f.read().strip() == '1'
         except (FileNotFoundError, PermissionError, OSError):
             return False
@@ -261,7 +259,7 @@ class DeviceInfo:
         """
         devices = {}
         try:
-            with open('/proc/partitions', 'r', encoding='utf-8') as f:
+            with open('/proc/partitions', encoding='utf-8') as f:
                 for line in f:
                     parts = line.split()
                     if len(parts) == 4 and parts[0].isdigit():
@@ -315,7 +313,7 @@ class DeviceInfo:
         """
         mounts = {}
         try:
-            with open('/proc/mounts', 'r', encoding='utf-8') as f:
+            with open('/proc/mounts', encoding='utf-8') as f:
                 for line in f:
                     parts = line.split()
                     if len(parts) >= 3 and parts[0].startswith('/dev/'):
@@ -336,7 +334,7 @@ class DeviceInfo:
         """Return canonical block names currently used as swap (non-blocking)."""
         names = set()
         try:
-            with open('/proc/swaps', 'r', encoding='utf-8') as f:
+            with open('/proc/swaps', encoding='utf-8') as f:
                 next(f, None)  # skip header line
                 for line in f:
                     parts = line.split()
@@ -410,7 +408,7 @@ class DeviceInfo:
         if DeviceInfo._read_sysfs_dir(f'/sys/class/block/{name}/holders'):
             return True
         try:
-            with open('/proc/mounts', 'r', encoding='utf-8') as f:
+            with open('/proc/mounts', encoding='utf-8') as f:
                 for line in f:
                     parts = line.split()
                     if parts and DeviceInfo._block_name_from_devpath(parts[0]) == name:
@@ -463,7 +461,7 @@ class DeviceInfo:
         Reads /sys/class/block/{name}/size which contains sector count.
         """
         try:
-            with open(f'/sys/class/block/{name}/size', 'r', encoding='utf-8') as f:
+            with open(f'/sys/class/block/{name}/size', encoding='utf-8') as f:
                 sectors = int(f.read().strip())
             return sectors * 512  # Convert to bytes
         except (FileNotFoundError, ValueError, Exception):
@@ -477,7 +475,7 @@ class DeviceInfo:
         """
         # Try NVMe-style path first (plain text)
         try:
-            with open(f'/sys/class/block/{name}/device/serial', 'r', encoding='utf-8') as f:
+            with open(f'/sys/class/block/{name}/device/serial', encoding='utf-8') as f:
                 # Sanitize: some USB bridges return strings with embedded nulls
                 return f.read().strip().replace('\x00', '')
         except (FileNotFoundError, Exception):
@@ -531,7 +529,7 @@ class DeviceInfo:
                         result['uuid'] = line.split('=', 1)[1].strip()
                     elif line.startswith('E:ID_PART_ENTRY_UUID=') and not result['uuid']:
                         result['uuid'] = line.split('=', 1)[1].strip()
-        except (FileNotFoundError, IOError, OSError):
+        except (FileNotFoundError, OSError):
             pass
         return result
 
@@ -733,7 +731,7 @@ class DeviceInfo:
 
         # Phase 4b: Clear marker display and state for disks with actual partitions
         # If a disk has partitions, the partitions take precedence over the wipe marker
-        for name, entry in entries.items():
+        for entry in entries.values():
             if entry.minors:  # Disk has child partitions
                 entry.marker = ''  # Don't show marker when partitions exist
                 # Also clear the state if it was set to a wipe state ('W' or 's')
@@ -875,7 +873,7 @@ class DeviceInfo:
             # Must be writable (excludes CD-ROMs, eMMC boot partitions, etc.)
             ro_path = f'/sys/class/block/{name}/ro'
             try:
-                with open(ro_path, 'r', encoding='utf-8') as f:
+                with open(ro_path, encoding='utf-8') as f:
                     if f.read().strip() != '0':
                         continue  # Skip read-only devices
             except (FileNotFoundError, Exception):
@@ -1262,7 +1260,7 @@ class DeviceInfo:
                          if part.parent == disk.name]
 
             if disk_parts:
-                for i, (part_name, part) in enumerate(sorted(disk_parts)):
+                for i, (_, part) in enumerate(sorted(disk_parts)):
                     is_last = (i == len(disk_parts) - 1)
                     branch = '└─' if is_last else '├─'
 
@@ -1281,7 +1279,7 @@ class DeviceInfo:
                         mounts_str = ', '.join(part.mounts)
                         print(f'│  {"  " if is_last else "│ "}  Mounted: {mounts_str}')
             else:
-                print(f'│  └─ (no partitions)')
+                print('│  └─ (no partitions)')
 
             print('│')
 

@@ -5,9 +5,9 @@ Each device gets its own worker thread that handles potentially-blocking
 operations (sysfs reads, hdparm, nvme commands) without freezing the UI.
 """
 import os
-import time
-import threading
 import queue
+import threading
+import time
 from enum import Enum
 
 from .DrivePreChecker import DrivePreChecker
@@ -315,8 +315,8 @@ class DeviceWorker(threading.Thread):
         """Probe marker once and format the result as a string."""
         try:
             # Import here to avoid circular dependency
+
             from .WipeJob import WipeJob
-            import datetime
 
             marker = WipeJob.read_marker_buffer(self.device_name)
 
@@ -381,10 +381,10 @@ class DeviceWorker(threading.Thread):
         """
         path = f"/sys/class/block/{self.device_name}/{attr_path}"
         try:
-            with open(path, 'r') as f:
+            with open(path) as f:
                 # Sanitize: some USB bridges return strings with embedded nulls
                 return f.read().strip().replace('\x00', '')
-        except (FileNotFoundError, IOError, OSError):
+        except (FileNotFoundError, OSError):
             return ''
 
     def _read_vpd_serial(self):
@@ -399,7 +399,7 @@ class DeviceWorker(threading.Thread):
                 if len(data) > 4:
                     # Sanitize: remove nulls that some USB bridges include
                     return data[4:].decode('ascii', errors='ignore').strip().replace('\x00', '')
-        except (FileNotFoundError, IOError, OSError):
+        except (FileNotFoundError, OSError):
             pass
         return ''
 
@@ -409,7 +409,7 @@ class DeviceWorker(threading.Thread):
             sysfs_path = f'/sys/class/block/{self.device_name}'
             real_path = os.path.realpath(sysfs_path).lower()
             return '/usb' in real_path
-        except (OSError, IOError):
+        except OSError:
             return False
 
     def _is_rotational_device(self):
@@ -424,7 +424,7 @@ class DeviceWorker(threading.Thread):
         """
         try:
             path = f'/sys/block/{self.device_name}/queue/rotational'
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(path, encoding='utf-8') as f:
                 return f.read().strip() == '1'
         except (FileNotFoundError, PermissionError, OSError):
             return False

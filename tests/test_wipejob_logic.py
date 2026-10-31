@@ -10,7 +10,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-
 from dwipe.WipeJob import WipeJob
 from dwipe.WipeTask import WipeTask
 

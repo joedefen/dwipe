@@ -17,8 +17,8 @@ import json
 import time
 from types import SimpleNamespace
 
-from .WipeTask import WipeTask
 from .Utils import Utils
+from .WipeTask import WipeTask
 
 # Fields accepted by parse_marker_buffer, with the type each must have.
 _INT_FIELDS = ("unixtime", "scrubbed_bytes", "size_bytes", "passes")

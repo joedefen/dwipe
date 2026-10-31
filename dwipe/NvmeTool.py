@@ -1,10 +1,10 @@
-import os
-import json
-import subprocess
 import io
+import json
 import re
+import subprocess
 import time
 from types import SimpleNamespace
+
 from .Utils import Utils
 
 
@@ -200,12 +200,16 @@ class NvmeTool:
             return self.job.process
 
         except Exception as e:
+            # Bind the message before leaving the handler: Python unbinds `e`
+            # at the end of the `except` block, so a lambda closing over it
+            # would raise NameError when the task manager called it.
+            error_text = str(e)
             self.job.process = SimpleNamespace(
                 poll=lambda: 1,
                 returncode=1,
                 stdout=io.StringIO(""),
-                stderr=io.StringIO(str(e)),
-                communicate=lambda: ("", str(e))
+                stderr=io.StringIO(error_text),
+                communicate=lambda: ("", error_text)
             )
             return self.job.process
 
