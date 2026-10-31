@@ -1,7 +1,7 @@
 # dwipe
 `dwipe` is a tool to wipe disks and partitions for Linux to help secure your data. `dwipe` aims to reduce mistakes by providing ample information about your devices during selection.
 
-![Demo of dwipe](https://raw.githubusercontent.com/joedefen/dwipe/master/images/dwipe-2026-02-05.07-58.gif)
+![Demo of dwipe](https://raw.githubusercontent.com/joedefen/dwipe/main/images/dwipe-2026-02-05.07-58.gif)
 ### Quick Comparison
 
 | Feature | dwipe | nwipe | shred | dd |
