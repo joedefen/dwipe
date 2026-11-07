@@ -14,7 +14,8 @@ to the modules it describes; every path below is therefore relative to
 | --- | --- |
 | [`dwipe/__init__.py`](../dwipe/__init__.py) | `__version__`, and nothing else. The build backend reads it, `dwipe --version` prints it, `bless` reads the line without importing the package. |
 | [`pyproject.toml`](../pyproject.toml) | Name, description, keywords, `requires-python`, runtime dependencies, the SPDX `license` and `license-files`, the `test`/`dev` extras, and the pytest, coverage and ruff configuration. |
-| [`bless`](../bless) | The release gate. Copied verbatim from `pwr-tray`/`my-snaps`; it holds no copy of this project's identity. |
+| [`bless`](../bless) | The release gate. Emitted from `~/Projects/blessd/bless` by that repository's `build.py` and never edited here; it holds no copy of this project's identity. |
+| `~/Projects/blessd/docs/release-strategy.md` | The shared rationale behind the gate: why the upload is local and irreversible, and how the branch model follows from that. |
 | [`tests/inspect_dist.py`](../tests/inspect_dist.py) | The distribution inspector. `bless` refuses to upload a wheel and sdist it has not inspected with this file. |
 | [`runner`](../runner) | Runs the tree from source (`python -m dwipe.main`) for debugging. |
 | [`linter`](../linter) | The advisory pylint run for one file, with the project root on `sys.path`. |
@@ -82,7 +83,7 @@ again. Enter, `quit` or Ctrl-C stops with nothing tagged, uploaded or pushed.
 **Stages, in order**
 
 1. **preflight** -- clean tree, the `vX.Y.Z` tag absent, `twine>=7` and
-   `packaging>=26` present, and `main`/`dev` both local and on `origin`.
+   `packaging>=26` present, and `python -m build` answering.
 2. **index check** -- refuses if `__version__` is already on PyPI, printing
    every published version, before anything is built or uploaded.
 3. **gates** -- the three commands above.
@@ -170,17 +171,31 @@ the tagged commit. Everything else about the release is one of the stages above.
 
 ## Notes on this adoption
 
-* [`bless`](../bless) was copied byte-for-byte from `../pwr-tray/bless` (SHA-256
-  `4f756337840b0619fbf6f077b00d4bb3fb9aee95ff18bbeb6a0521d39d52131e`) and is
-  not edited here: reuse is "copy verbatim", and any later upstream change is
-  adopted as a new copy.
-* `dwipe` needed four things `pwr-tray` already had: one version location
-  (`dynamic = ["version"]`), an inspector, the `dev` extra with `build`,
-  `twine>=7` and `packaging>=26`, and a console script that answers
-  `--version`. The metadata was moved to the PEP 639 `license` expression and
-  `license-files` at the same time, which is why the build backend floor is
-  `flit_core>=3.12`.
+* [`bless`](../bless) is emitted from `~/Projects/blessd/bless` by that
+  repository's `build.py`; it is never edited here. The policy the gate
+  enforces -- the branch plan, the prompt, the index check, the build, the
+  emitter -- and the tests of that policy live in `~/Projects/blessd`, once.
+  This tree carries the build with SHA-256
+  `3ef60e9e806ca58a3d900dd6622bb8be0052210da1ef26f9918bf0a1deb1e3b2`
+  (55222 bytes), which
+
+      python3 ~/Projects/blessd/build.py --into . --force
+
+  reproduces byte for byte, so `cmp ~/Projects/blessd/bless bless` is silent.
+  A later gate is adopted the same way, as a new emission rather than an edit.
+* `dwipe` had to provide what the gate reads instead of being told it: one
+  version location (`dynamic = ["version"]`, the line in
+  [`dwipe/__init__.py`](../dwipe/__init__.py)), an inspector
+  ([`tests/inspect_dist.py`](../tests/inspect_dist.py)), a console script that
+  answers `--version` (`dwipe`), the `dev` extra with `build`, `twine>=7` and
+  `packaging>=26`, and the `main`/`dev` branch pair -- the gate's default
+  model, so no `[tool.bless]` table is needed. The metadata was moved to the
+  PEP 639 `license` expression and `license-files` at the same time, which is
+  why the build backend floor is `flit_core>=3.12`.
 * The ruff rule set was added with the gate, so the whole tree was brought to a
-  clean `ruff check .` once. [`tests/test_bless.py`](../tests/test_bless.py) and
-  [`tests/test_repo_hygiene.py`](../tests/test_repo_hygiene.py) keep the gate,
-  the inspector and the single version location from drifting.
+  clean `ruff check .` once. [`tests/test_bless.py`](../tests/test_bless.py) now
+  covers only this tree's identity -- the name, module, console script and
+  branch model `bless` derives from `pyproject.toml`, the version reported by
+  `dwipe --version` -- and the inspector; the gate's policy tests are part of
+  the shared repository. [`tests/test_repo_hygiene.py`](../tests/test_repo_hygiene.py)
+  keeps the gate, the dev extra and the single version location from drifting.

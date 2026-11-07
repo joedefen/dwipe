@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """bless -- the only path to a PyPI upload for this project.
 
-    ./bless            run every gate, then ask: test, publish, or stop
+    ./bless              run every gate, then ask: test, publish, or stop
+    ./bless --branch-plan  print the branch plan as JSON and exit
 
-There is no argument and no flag that skips a stage: the gate runs first and it
-always runs, because publishing is a single intent or it does not happen.  When
-it passes, bless prints everything that is in hand and then prompts
+No argument skips a stage: the gate runs first and it always runs, because
+publishing is a single intent or it does not happen.  `--branch-plan` is not an
+exception to that, because it does not enter the gate at all.  It answers one
+question about this tree -- which branches `publish` would move, or why it
+would refuse -- as a single JSON object on stdout, then exits: no index read,
+no gates, no build, no prompt, no network, so it works in a tree whose `.venv`
+is missing.  It exits 0 whenever it answers, including when the answer is a
+refusal, because a refusal is data here and not a failure.  `bt` asks this
+before it installs anything, and keeps its own copy of the policy for the
+projects whose vendored `bless` is older than the flag.
+
+When the gate passes, bless prints everything that is in hand and then prompts
 
     ====> Enter test or publish or quit:
 
@@ -36,11 +46,16 @@ TestPyPI just because both happen to be configured on the same machine.
 
 Why no CI publish job: the upload is irreversible and the owner runs it from
 the tree, so the safety has to be visible and local.  CI stays a gate.  The
-branch model follows from the same decision: a release leaves `main` and `dev`
-at one commit and tags it, so `publish` aligns them here instead of asking the
-owner to remember.
+branch model follows from the same decision: a release leaves every branch the
+project names at one commit and tags it, so `publish` aligns them here instead
+of asking the owner to remember.  `main` and `dev` is the default; `main` alone
+is the supported model for a project that commits straight to the trunk.
 
-How to reuse: copy this file to another project's root.  Nothing about this
+How to reuse: this file is emitted verbatim by `build.py` in the `blessd`
+repository and vendored at a project's root.  Edit it in `blessd` and re-emit;
+never edit a project's copy, because the copy is what that project releases
+with and nothing in the copy can tell you it has fallen behind.  `sha256sum
+bless` matches a project's copy to the build it came from.  Nothing about the
 project is written into it -- `identity()` reads the whole of it from
 `pyproject.toml` at start-up:
 
@@ -53,7 +68,14 @@ project is written into it -- `identity()` reads the whole of it from
   * the inspector is `tests/inspect_dist.py`, overridable with
     `[tool.bless] inspect = "path"`, or `inspect = ""` to skip it knowingly;
   * `[tool.bless] smoke_args` adds an argv to that smoke run and
-    `smoke_expect` is the text its output must contain.
+    `smoke_expect` is the text its output must contain;
+  * `[tool.bless] branches` is the branch model `publish` keeps.  `["main",
+    "dev"]`, the default, aligns the development branch with the trunk before
+    tagging when that branch exists; `["main"]` releases from the trunk alone
+    and aligns nothing.  One or two names and no more, because the plan
+    fast-forwards one onto another.  A development branch that has not been
+    created yet is not a refusal: while HEAD is the trunk, `bless` releases
+    from the trunk and pushes only what exists.
 
 What a project must then provide, because these are the assumptions that are
 not worth guessing:
@@ -72,18 +94,21 @@ not worth guessing:
   * an inspector at that path: bless never uploads a distribution it has not
     inspected, so a missing one is a refusal, not a silent skip;
   * a console script, if declared, that prints the version for `--version`;
-  * the `main`/`dev` pair and `vX.Y.Z` tags.  The gate runs before the prompt,
-    so it refuses a detached HEAD and a version that is already tagged: a
-    rehearsal is always preceded by the checks the real release needs, never by
-    looser ones.
+  * the branches named by `[tool.bless] branches` -- `main` and `dev` unless
+    the project says otherwise -- with the trunk already pushed to origin; a
+    development branch has to be pushed once it exists, and until it exists
+    `bless` releases from the trunk alone; and `vX.Y.Z` tags.  The gate runs
+    before the prompt, so it refuses a detached HEAD and a version that is
+    already tagged: a rehearsal is always preceded by the checks the real
+    release needs, never by looser ones.
 
 Stages, in order: preflight (clean tree, tag absent, tool floors), index check,
 gates (ruff, compileall, pytest with coverage), build into build/bless-<ver>/,
 inspect the two files, `twine check --strict`, install-and-run smoke, the branch
 plan.  Then the checklist and the prompt.  `test` builds the throwaway
 `X.Y.Z.99.N` from a copy, uploads it and verifies it on TestPyPI, and stops
-there.  `publish` aligns the two branches, tags, uploads to PyPI, verifies and
-pushes.
+there.  `publish` aligns the release branches, tags, uploads to PyPI, verifies
+and pushes.
 
 Verifying means reading the index back, and that read is deliberately patient.
 Both indexes answer through a CDN that has been taking minutes -- sometimes more
@@ -144,6 +169,14 @@ TOOL_PURPOSE = {
     'packaging': 'read the metadata version that `twine check` validates',
 }
 DEFAULT_INSPECTOR = 'tests/inspect_dist.py'
+# The branch model `publish` keeps, unless `[tool.bless] branches` says
+# otherwise.  Two names mean "align the development branch with the trunk
+# before tagging"; one name means "release from this branch, align nothing".
+DEFAULT_BRANCHES = ('main', 'dev')
+# The shape of `--branch-plan`'s report.  Bumped when a key changes meaning, so
+# a caller that reads it can refuse a shape it was not written for instead of
+# misreading one.
+PLAN_SCHEMA = 1
 
 # What a throwaway build must not copy out of the tree.
 COPY_EXCLUDES = ('.git', 'build', 'dist', '.venv', 'env', 'venv', '__pycache__',
@@ -161,6 +194,16 @@ def say(stage: str, message: str) -> None:
     print(f'[{stage}] {message}', flush=True)
 
 
+def _joined(branches) -> str:
+    """'main' or 'main and dev': the branches as a statement reads them."""
+    return ' and '.join(branches)
+
+
+def _or_joined(branches) -> str:
+    """'main' or 'main or dev': the branches as the only choices there are."""
+    return ' or '.join(branches)
+
+
 def _manifest(root: Path) -> dict:
     """This tree's pyproject.toml: the one place its identity is written down."""
     path = root / 'pyproject.toml'
@@ -173,14 +216,35 @@ def _manifest(root: Path) -> dict:
             'will not guess any of them') from None
 
 
+def _branches(declared) -> tuple[str, ...]:
+    """`[tool.bless] branches`: the trunk alone, or the trunk and one more.
+
+    Refusing anything else is deliberate.  `publish` fast-forwards one branch
+    onto another, and a plan that quietly picked which of three branches to
+    move would be a guess about the project's model instead of a gate on it.
+    """
+    if declared is None:
+        return DEFAULT_BRANCHES
+    if (not isinstance(declared, list) or not 1 <= len(declared) <= 2
+            or len(set(declared)) != len(declared)
+            or not all(isinstance(branch, str) and branch for branch in declared)):
+        raise BlessError(
+            f'[tool.bless] branches is {declared!r}; bless supports one branch '
+            'name or two.\nUse ["main"] to release from the trunk alone, or '
+            '["main", "dev"] (the default) to align a development branch with '
+            'it before tagging.')
+    return tuple(declared)
+
+
 def identity(root: Path = ROOT) -> dict:
     """What bless must know about the project, read rather than written here.
 
     `[project] name` gives the distribution name; the package holding the
     release number is that name with `-` and `.` turned into `_`; the console
     script is the first entry of `[project.scripts]`; `[tool.bless]` overrides
-    any of it.  Refusing here -- and naming both ways to fix it -- is what lets
-    the script move to another project without guessing wrong in silence.
+    any of it, including the branch model `publish` keeps.  Refusing here -- and
+    naming both ways to fix it -- is what lets the script move to another
+    project without guessing wrong in silence.
     """
     manifest = _manifest(root)
     project = manifest.get('project') or {}
@@ -211,6 +275,7 @@ def identity(root: Path = ROOT) -> dict:
         'inspector': settings.get('inspect', DEFAULT_INSPECTOR),
         'smoke_args': list(settings.get('smoke_args') or []),
         'smoke_expect': settings.get('smoke_expect'),
+        'branches': _branches(settings.get('branches')),
     }
 
 
@@ -321,7 +386,9 @@ def preflight(version: str) -> dict:
 
     branch = git('rev-parse', '--abbrev-ref', 'HEAD')
     if branch == 'HEAD':
-        raise BlessError('HEAD is detached; bless publishes only from main or dev')
+        raise BlessError(
+            'HEAD is detached; bless publishes only from '
+            f'{_or_joined(PROJECT["branches"])}')
     sha = git('rev-parse', '--short', 'HEAD')
     if run(['git', 'rev-parse', '-q', '--verify', f'refs/tags/v{version}'],
            capture=True).returncode == 0:
@@ -602,45 +669,74 @@ def smoke(wheel: Path, version: str) -> None:
                      f'printed {wanted!r}')
 
 
-def branch_plan(current: str | None, tips: dict[str, str | None],
-                is_ancestor) -> dict:
-    """Decide what `publish` must do to leave main and dev identical.
+def branch_plan(current: str | None, tips: dict[str, str | None], is_ancestor,
+                branches: tuple[str, ...] = DEFAULT_BRANCHES) -> dict:
+    """Decide what `publish` must do to leave the release branches identical.
 
-    Pure in everything that matters: the caller supplies the tips and the
-    ancestry test, so the whole table in the plan is testable without a git
-    remote.  Returns either `{'refusal': reason}` or `{'align': branch|None}`.
+    `branches` is `[tool.bless] branches`: one name for a project that commits
+    straight to the trunk, two for a project with a development branch.  Pure in
+    everything that matters -- the caller supplies the tips and the ancestry
+    test, so the whole table in the plan is testable without a git remote.
+    Returns `{'refusal': reason}`, or `{'align': branch|None, 'release':
+    branches}`, where `align` names the single branch that has to catch up and
+    `release` is what will be pushed.
+
+    A development branch that does not exist yet is not a refusal.  The model
+    says "align the trunk with the development branch *if there is one*", and
+    demanding one would make `branches = ["main", "dev"]` mean "you may not
+    release until you have created `dev`".  Releasing from the trunk alone is
+    allowed exactly while HEAD is the trunk -- a development branch that is
+    missing cannot be the branch being blessed -- and then `release` holds the
+    trunk only, so nothing absent is ever pushed.
     """
-    if current not in ('main', 'dev'):
+    if current not in branches:
         where = 'a detached HEAD' if current is None else f'branch {current}'
-        return {'refusal': f'HEAD is on {where}; bless publishes only from main or dev'}
-
-    for branch in ('main', 'dev'):
-        if not tips.get(branch):
-            return {'refusal': f'{branch} does not exist locally'}
-        if not tips.get(f'origin/{branch}'):
-            return {'refusal': f'origin/{branch} does not exist; push it before blessing'}
-
-    main, dev = tips['main'], tips['dev']
-    if main == dev:
-        align = None
-    elif is_ancestor(main, dev):
-        align = 'main'
-    elif is_ancestor(dev, main):
-        align = 'dev'
-    else:
         return {'refusal': (
-            f'main ({main[:7]}) and dev ({dev[:7]}) have diverged; merge or '
-            'rebase until one contains the other, then bless again')}
+            f'HEAD is on {where}; bless publishes only from '
+            f'{_or_joined(branches)}')}
 
-    after = dict(tips)
-    if align:
-        after[align] = tips['dev' if align == 'main' else 'main']
-    for branch in ('main', 'dev'):
-        if not is_ancestor(tips[f'origin/{branch}'], after[branch]):
+    trunk, *development = branches
+    if not tips.get(trunk):
+        return {'refusal': f'{trunk} does not exist locally'}
+    if not tips.get(f'origin/{trunk}'):
+        return {'refusal': f'origin/{trunk} does not exist; push it before blessing'}
+
+    present = [trunk]
+    for branch in development:
+        if not tips.get(branch):
+            if current != trunk:
+                return {'refusal': (
+                    f'{current} is checked out but does not exist locally, so '
+                    f'bless cannot align {trunk} with it')}
+            continue
+        if not tips.get(f'origin/{branch}'):
+            return {'refusal': (
+                f'origin/{branch} does not exist; push it before blessing')}
+        present.append(branch)
+
+    follower = next((branch for branch in present if branch != current), None)
+    align = None
+    if follower is not None and tips[follower] != tips[current]:
+        if is_ancestor(tips[follower], tips[current]):
+            align = follower
+        elif is_ancestor(tips[current], tips[follower]):
+            align = current
+        else:
+            return {'refusal': (
+                f'{current} ({tips[current][:7]}) and {follower} '
+                f'({tips[follower][:7]}) have diverged; merge or rebase until '
+                'one contains the other, then bless again')}
+
+    # Afterwards every branch sits at one commit, and origin has to be able to
+    # fast-forward to it -- checked here, because the push happens last, after
+    # the upload, when a refusal can no longer be undone.
+    target = tips[follower] if align == current else tips[current]
+    for branch in present:
+        if not is_ancestor(tips[f'origin/{branch}'], target):
             return {'refusal': (
                 f'pushing {branch} would not be a fast-forward on origin; '
                 f'pull/rebase {branch} first')}
-    return {'align': align}
+    return {'align': align, 'release': tuple(present)}
 
 
 def _maybe_rev(reference: str) -> str | None:
@@ -648,22 +744,101 @@ def _maybe_rev(reference: str) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def branch_stage(branch: str) -> dict:
-    tips = {name: _maybe_rev(reference) for name, reference in (
-        ('main', 'main'), ('dev', 'dev'),
-        ('origin/main', 'origin/main'), ('origin/dev', 'origin/dev'))}
+def branch_stage(branch: str,
+                 branches: tuple[str, ...] = DEFAULT_BRANCHES) -> dict:
+    names = [*branches, *(f'origin/{name}' for name in branches)]
+    tips = {name: _maybe_rev(name) for name in names}
     plan = branch_plan(
         branch, tips,
         lambda older, newer: run(
             ['git', 'merge-base', '--is-ancestor', older, newer],
-            capture=True).returncode == 0)
+            capture=True).returncode == 0,
+        branches)
     if 'refusal' in plan:
         raise BlessError(plan['refusal'])
+    released = plan['release']
     if plan['align']:
         say('branch', f'would fast-forward {plan["align"]} to {tips[branch][:7]}')
+    elif len(released) > 1:
+        say('branch', f'{_joined(released)} are already the same commit')
+    elif len(branches) > 1:
+        say('branch', f'{branches[1]} does not exist; releasing from '
+                      f'{released[0]} alone')
     else:
-        say('branch', 'main and dev are already the same commit')
+        say('branch', f'{released[0]} is the only release branch')
     return plan
+
+
+def _plan_state(current: str | None, tips: dict[str, str | None], plan: dict,
+                branches: tuple[str, ...], diverged: bool) -> str:
+    """Which row of the plan table this is, in one word a caller can switch on.
+
+    `branch_plan` stays the authority -- this only names what it decided, so a
+    caller can choose its own sentences and its own severity without parsing
+    the refusal text.  `diverged` is the one fact the plan does not carry
+    separately, because it only ever appears inside a refusal.
+    """
+    if current is None:
+        return 'detached'
+    if current not in branches:
+        return 'off-branch'
+    trunk, *development = branches
+    if not tips.get(trunk):
+        return 'no-trunk'
+    if 'refusal' in plan:
+        if diverged:
+            return 'diverged'
+        if any(tips.get(name) and not tips.get(f'origin/{name}')
+               for name in branches):
+            return 'unpushed'
+        return 'refused'
+    if plan['align']:
+        return 'align'
+    if development and not tips.get(development[0]):
+        return 'missing-dev'
+    if len(plan['release']) > 1:
+        return 'same'
+    return 'single'
+
+
+def plan_report() -> dict:
+    """`--branch-plan`: the branch plan as data, and nothing else.
+
+    The report is the same `branch_plan()` table `publish` obeys, annotated
+    with the facts a caller needs to say it in its own words: the tips of every
+    ref the model names, the branches that exist but are not on origin, and
+    `state`, one word naming which row of that table this is.
+    """
+    branches = PROJECT['branches']
+    branch = git('rev-parse', '--abbrev-ref', 'HEAD')
+    current = None if branch == 'HEAD' else branch
+    names = [*branches, *(f'origin/{name}' for name in branches)]
+    tips = {name: _maybe_rev(name) for name in names}
+
+    def is_ancestor(older: str, newer: str) -> bool:
+        return run(['git', 'merge-base', '--is-ancestor', older, newer],
+                   capture=True).returncode == 0
+
+    plan = branch_plan(current, tips, is_ancestor, branches)
+    trunk, *development = branches
+    second = development[0] if development else None
+    diverged = bool(second and tips.get(trunk) and tips.get(second)
+                    and tips[trunk] != tips[second]
+                    and not is_ancestor(tips[trunk], tips[second])
+                    and not is_ancestor(tips[second], tips[trunk]))
+    return {
+        'schema': PLAN_SCHEMA,
+        'project': NAME,
+        'branch': current,
+        'branches': list(branches),
+        'tips': tips,
+        'unpushed': [name for name in branches
+                     if tips.get(name) and not tips.get(f'origin/{name}')],
+        'state': _plan_state(current, tips, plan, branches, diverged),
+        'reason': plan.get('refusal'),
+        'align': plan.get('align'),
+        'release': list(plan.get('release') or ()),
+    }
 
 
 def align_branches(plan: dict, branch: str) -> None:
@@ -880,23 +1055,42 @@ def install_hint(version: str) -> None:
     print(f'Undo it with: python -m pip uninstall {NAME}')
 
 
-def publish_git(version: str, branch: str, other: str) -> None:
-    for reference in (branch, other, f'v{version}'):
+def push_references(branch: str, version: str,
+                    branches: tuple[str, ...] | None = None) -> list[str]:
+    """What `publish` pushes: the branch HEAD is on, the others, then the tag.
+
+    `branches` is the plan's `release` list, so a development branch that does
+    not exist yet is never pushed, and `PROJECT['branches']` stays the default
+    only for a caller that has no plan.
+    """
+    branches = PROJECT['branches'] if branches is None else branches
+    others = [name for name in branches if name != branch]
+    return [branch, *others, f'v{version}']
+
+
+def publish_git(references: list[str]) -> None:
+    """Push each reference; a refusal names the whole push, not the one step."""
+    for reference in references:
         result = run(['git', 'push', 'origin', reference])
         if result.returncode != 0:
             raise BlessError(
                 f'git push origin {reference} failed; the index is already '
                 'correct.\nFinish the job with:\n'
-                f'  git push origin {branch} {other} v{version}')
+                f'  git push origin {" ".join(references)}')
         say('push', reference)
 
 
 def checklist(version: str, facts: dict, public: list[str],
               wheel: Path, sdist: Path, plan: dict) -> None:
     """What is in hand, printed before the prompt asks what to do with it."""
-    other = 'dev' if facts['branch'] == 'main' else 'main'
-    align = (f'fast-forward {plan["align"]} to {facts["sha"]}'
-             if plan['align'] else 'nothing (main and dev already match)')
+    branches = plan.get('release') or PROJECT['branches']
+    others = [name for name in branches if name != facts['branch']]
+    if plan['align']:
+        align = f'fast-forward {plan["align"]} to {facts["sha"]}'
+    elif others:
+        align = f'nothing ({_joined(branches)} already match)'
+    else:
+        align = f'nothing ({branches[0]} is the only release branch)'
     latest = public[-1] if public else 'none'
     print()
     print('Every gate passed, and nothing has been tagged, uploaded or pushed.')
@@ -909,7 +1103,8 @@ def checklist(version: str, facts: dict, public: list[str],
     print('  branches   ' + align)
     print(f'  would tag  v{version}')
     print(f'  would send {wheel.name} and {sdist.name} to PyPI')
-    print(f'  would push {facts["branch"]}, {other} and v{version} to origin')
+    print(f'  would push {", ".join([facts["branch"], *others])} and v{version} '
+          'to origin')
     print()
     print('  test      build a throwaway X.Y.Z.99.N from a copy and upload it')
     print('            to TestPyPI; no tag, no branch, no push')
@@ -964,6 +1159,20 @@ def ask_mode() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if '--branch-plan' in argv:
+        try:
+            if len(argv) > 1:
+                raise BlessError(
+                    '--branch-plan takes no other argument: it reports this '
+                    'tree\'s branch plan and exits, without a mode and '
+                    'without the gate')
+            print(json.dumps(plan_report(), indent=2))
+        except BlessError as exc:
+            print(f'bless: refused: {exc}', file=sys.stderr)
+            return 1
+        return 0
+
     parser = argparse.ArgumentParser(
         prog='bless',
         description='Run every gate on this tree, then ask what to do with a '
@@ -986,7 +1195,7 @@ def main(argv: list[str] | None = None) -> int:
         inspect_dist(wheel, sdist)
         check(wheel, sdist)
         smoke(wheel, version)
-        plan = branch_stage(facts['branch'])
+        plan = branch_stage(facts['branch'], PROJECT['branches'])
         checklist(version, facts, public, wheel, sdist, plan)
 
         mode = ask_mode()
@@ -1000,18 +1209,19 @@ def main(argv: list[str] | None = None) -> int:
         align_branches(plan, facts['branch'])
         tag(version)
         upload(wheel, sdist, version)
+        references = push_references(facts['branch'], version, plan['release'])
         verify_index(version, wheel, advice=(
             f'The tag v{version} exists locally and PyPI has both files, so '
             'only the push is left:\n'
-            f'  git push origin {facts["branch"]} '
-            f'{"dev" if facts["branch"] == "main" else "main"} v{version}'))
-        publish_git(version, facts['branch'],
-                    'dev' if facts['branch'] == 'main' else 'main')
+            f'  git push origin {" ".join(references)}'))
+        publish_git(references)
     except BlessError as exc:
         print(f'bless: refused: {exc}', file=sys.stderr)
         return 1
 
-    say('done', f'{NAME} {version} is published and main and dev are tagged')
+    branches = PROJECT['branches']
+    say('done', f'{NAME} {version} is published and {_joined(branches)} '
+                 f'{"are" if len(branches) > 1 else "is"} tagged')
     return 0
 
 
