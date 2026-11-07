@@ -12,6 +12,8 @@ import os
 import sys
 import traceback
 
+from console_window import cli
+
 from . import __version__
 from .DiskWipe import DiskWipe
 from .PersistentState import PersistentState
@@ -55,6 +57,11 @@ def main():
     parser.add_argument('--auto-block-containers', choices=['on', 'off'],
                         default='on' if persist.state['auto_block_containers'] else 'off',
                         help='auto-block LUKS/LVM/RAID/swap containers on first sight (on/off)')
+    # --theme / --no-color come from the library, so the appearance switch and
+    # palette live in its one process-wide implementation rather than a copy
+    # here.  --no-color is a per-run switch; the remembered choice is settled
+    # later by DiskWipe, alongside NO_COLOR.
+    cli.add_display_arguments(parser, prog='dwipe')
     opts = parser.parse_args()
 
     # Convert string booleans to actual booleans
@@ -66,6 +73,10 @@ def main():
         if os.geteuid() != 0:
             # Re-run the script with sudo needed and opted
             Utils.rerun_module_as_root('dwipe.main')
+
+        # Apply --ascii/--glyphs/--theme/--no-color once, in the process that
+        # will draw the UI: a sudo re-run starts over from the same argv.
+        cli.apply_display_arguments(opts, prog='dwipe')
 
         prereqs = Prereqs(verbose=True)
         # blkid for filesystem detection; hdparm and nvme for firmware wipes

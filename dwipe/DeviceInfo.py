@@ -13,7 +13,7 @@ import traceback
 from fnmatch import fnmatch
 from types import SimpleNamespace
 
-from console_window import Theme
+from console_window import Theme, appearance
 
 from .DeviceWorker import DeviceWorkerManager, ProbeState
 from .DrivePreChecker import DrivePreChecker
@@ -1045,38 +1045,40 @@ class DeviceInfo:
             else:
                 emit += f'{sep}{ns.marker}'
 
-        # Determine color attribute based on state
+        # Determine color attribute based on state.  Semantic attributes, not
+        # pairs: the same states must degrade to the monochrome hierarchy when
+        # color is off (--no-color or NO_COLOR).
         attr = None
         # Check for newly inserted flag first (hot-swapped devices should always show orange)
         if getattr(ns, 'newly_inserted', False):
             # Newly inserted device - orange/bright
             if ns.state in ('Mnt', 'iMnt', 'Blk', 'iBlk'):
                 # Dim the orange for mounted/blocked devices
-                attr = curses.color_pair(Theme.HOTSWAP) | curses.A_DIM
+                attr = appearance.semantic_attr(Theme.HOTSWAP) | curses.A_DIM
             else:
-                attr = curses.color_pair(Theme.HOTSWAP) | curses.A_BOLD
+                attr = appearance.semantic_attr(Theme.HOTSWAP) | curses.A_BOLD
         elif ns.state == 's':
             # Yellow/warning color for stopped/partial wipes (with bold for visibility)
-            attr = curses.color_pair(Theme.WARNING) | curses.A_BOLD
+            attr = appearance.semantic_attr(Theme.WARNING) | curses.A_BOLD
         elif ns.state == 'W' and getattr(ns, 'wiped_this_session', False):
             # Green/success color for completed wipes (done in THIS session only) - bold and bright
-            attr = curses.color_pair(Theme.SUCCESS) | curses.A_BOLD
+            attr = appearance.semantic_attr(Theme.SUCCESS) | curses.A_BOLD
         elif ns.state == 'W':
             # Green/success color for completed wipes before this session
-            attr = curses.color_pair(Theme.OLD_SUCCESS) | curses.A_BOLD
+            attr = appearance.semantic_attr(Theme.OLD_SUCCESS) | curses.A_BOLD
         elif ns.state.endswith('%') and ns.state not in ('100%',):
             # Active wipe in progress - bright cyan/blue with bold
-            attr = curses.color_pair(Theme.INFO) | curses.A_BOLD
+            attr = appearance.semantic_attr(Theme.INFO) | curses.A_BOLD
         elif ns.state == '^':
             # Newly inserted device (hot-swapped) - orange/bright
-            attr = curses.color_pair(Theme.HOTSWAP) | curses.A_BOLD
+            attr = appearance.semantic_attr(Theme.HOTSWAP) | curses.A_BOLD
         elif ns.state in ('Mnt', 'iMnt', 'Blk', 'iBlk'):
             # Dim mounted or blocked devices
             attr = curses.A_DIM
 
         # Override with red/danger color if verify failed
         if hasattr(ns, 'verify_failed_msg') and ns.verify_failed_msg:
-            attr = curses.color_pair(Theme.DANGER) | curses.A_BOLD
+            attr = appearance.semantic_attr(Theme.DANGER) | curses.A_BOLD
 
         # Make disk lines bold
         if ns.parent is None:

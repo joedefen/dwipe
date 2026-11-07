@@ -105,6 +105,8 @@ Simply run `dwipe` from the command line without arguments: `dwipe`
   - Percentage of disk to verify after wipe (1% = quick spot-check, 100% = full verify)
 
 #### Display and Performance
+- `--theme {default,dark-mono,light-mono,solarized-dark,solarized-light,gruvbox,nord}` - Color palette
+- `--no-color` - Draw semantic roles with attributes (bold/reverse) instead of color; also honored when the `NO_COLOR` environment variable is set
 - `--dense {True,False}` - Compact view mode (default: your last preference)
   - `True` - Compact spacing (fewer blank lines between disks)
   - `False` - Spaced view (blank lines between disks for readability)
@@ -158,11 +160,13 @@ Simply run `dwipe` from the command line without arguments: `dwipe`
 - `solarized-light` - Solarized Light palette (for light terminal backgrounds)
 - `gruvbox` - Gruvbox Dark palette
 - `nord` - Nord palette
+- `mono` - Draw without color at all, using bold/reverse attributes instead (also available as `--no-color` and through the `NO_COLOR` environment variable)
 
 **Changing themes:**
 - Press **t** from the main screen to open the theme preview screen
 - The theme screen shows color examples for each color purpose (DANGER, SUCCESS, WARNING, etc.)
 - Press **t** while on the theme screen to cycle through available themes and preview them live
+- The list ends with **mono**, which turns color off and leaves the selected palette underneath
 - Press **ESC** or **ENTER** to return to the main screen
 - Selected theme is saved and persists across sessions
 

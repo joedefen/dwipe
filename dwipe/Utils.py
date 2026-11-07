@@ -71,7 +71,14 @@ class Utils:
         """Rerun using the module name"""
         if os.geteuid() != 0:  # Re-run the script with sudo
             os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            vp = ['sudo', sys.executable, '-m', module_name] + sys.argv[1:]
+            args = sys.argv[1:]
+            # sudo resets the environment by default, so an exported NO_COLOR
+            # would not reach the process that actually draws the UI.  Carry it
+            # across as the equivalent switch; --no-color already wins over
+            # --theme, matching the no-color.org convention.
+            if os.environ.get('NO_COLOR') and '--no-color' not in args:
+                args = ['--no-color', *args]
+            vp = ['sudo', sys.executable, '-m', module_name] + args
             os.execvp('sudo', vp)
 
     @staticmethod

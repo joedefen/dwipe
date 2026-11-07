@@ -79,7 +79,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux"
 ]
 dependencies = [
-    'console-window == 2.1.3',
+    'console-window == 2.2.2',
 ]
 
 [project.optional-dependencies]

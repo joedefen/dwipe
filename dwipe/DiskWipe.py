@@ -29,6 +29,7 @@ from console_window import (
     Screen,
     ScreenStack,
     Theme,
+    appearance,
 )
 
 from .DeviceChangeMonitor import DeviceChangeMonitor
@@ -60,6 +61,52 @@ HELP_ST = 1
 LOG_ST = 2
 THEME_ST = 3
 SCREEN_NAMES = ('MAIN', 'HELP', 'HISTORY', 'THEMES')
+
+#: dwipe's own pseudo-theme.  ``mono`` is not a palette: choosing it turns
+#: semantic color off for the whole process, exactly like ``--no-color``.  The
+#: library leaves pseudo-themes to the application (``console_window.appearance``
+#: names ``mono`` as its standing example), so dwipe owns the name and the
+#: switch behind it.
+MONO_THEME = 'mono'
+#: The entries the theme picker cycles through: every library palette, then the
+#: mono pseudo-theme, so ``t`` wraps from the last palette into mono.
+THEME_CHOICES = (*Theme.list_all(), MONO_THEME)
+
+
+def resolve_theme_selection(cli_theme=None, no_color=False,
+                            saved_theme='', environ=None):
+    """Resolve startup appearance into ``(selected, theme, colors)``.
+
+    ``selected`` is the value the theme option should hold: a palette name or
+    :data:`MONO_THEME`.  ``theme`` is the palette to install (``''`` keeps the
+    library default) and ``colors`` is the process-wide switch.
+
+    Precedence is the library's: ``--no-color``, an explicit ``--theme``, the
+    ``NO_COLOR`` convention, then the remembered choice.  A remembered ``mono``
+    is normalized to "no palette plus color off" before resolving.
+
+    A per-run ``--no-color``/``NO_COLOR`` keeps the remembered palette in
+    ``selected`` rather than replacing it with ``mono``.  The switch is not a
+    saved preference, so the next ordinary start has to come back to the same
+    palette; only choosing ``mono`` in the picker saves it.
+    """
+    saved_theme = saved_theme or ''
+    saved_colors = saved_theme != MONO_THEME
+    saved_palette = '' if saved_theme == MONO_THEME else saved_theme
+    theme, colors = appearance.resolve_appearance(
+        cli_theme=cli_theme,
+        no_color=no_color,
+        saved_theme=saved_palette,
+        saved_colors=saved_colors,
+        environ=environ,
+    )
+    if cli_theme:
+        selected = Theme.resolve(cli_theme)
+    elif not colors and saved_theme == MONO_THEME:
+        selected = MONO_THEME
+    else:
+        selected = Theme.resolve(theme or Theme.get_current())
+    return selected, theme, colors
 
 
 class DiskWipe:
@@ -117,6 +164,47 @@ class DiskWipe:
             on_accept=self._on_filter_accept,
             on_cancel=self._on_filter_cancel
         )
+
+    def _settle_appearance(self, environ=None):
+        """Apply the startup color decision to the process and the theme option.
+
+        The remembered theme, ``--theme``, ``--no-color`` and the ``NO_COLOR``
+        convention all meet here; see :func:`resolve_theme_selection` for the
+        precedence and for why a per-run ``--no-color`` does not overwrite the
+        remembered palette.
+        """
+        saved_theme = self.persistent_state.state.get('theme', '') or ''
+        selected, theme, colors = resolve_theme_selection(
+            cli_theme=getattr(self.opts, 'theme', None),
+            no_color=bool(getattr(self.opts, 'no_color', False)),
+            saved_theme=saved_theme,
+            environ=environ,
+        )
+        appearance.set_colors_enabled(colors)
+        if theme:
+            Theme.set(theme)
+        self.opts.theme = selected
+        return selected, colors
+
+    def apply_theme_choice(self, choice):
+        """Make a theme-picker *choice* live and remember it.
+
+        ``mono`` is the pseudo-theme: a color mode rather than a palette, so it
+        flips the process-wide switch and leaves the installed palette where it
+        was (the same way ``--no-color`` keeps ``--theme``).  Choosing a real
+        palette is a request for color, so it lifts the switch again.
+        """
+        self.opts.theme = choice
+        if choice == MONO_THEME:
+            appearance.set_colors_enabled(False)
+        else:
+            appearance.set_colors_enabled(True)
+            self.win.set_theme(choice)
+        # A picker choice is a preference, so write it now: quitting from the
+        # same frame must not lose it.
+        self.persistent_state.state['theme'] = choice
+        self.persistent_state.dirty = True
+        self.persistent_state.save()
 
     def _start_wipe(self):
         """Start the wipe job after confirmation"""
@@ -513,8 +601,8 @@ class DiskWipe:
     def main_loop(self):
         """Main event loop"""
 
-        # Create screen instances
-        ThemeScreen = Theme.create_picker_screen(DiskWipeScreen)
+        # Create screen instances.  ThemeScreen is defined below with the other
+        # screens; it adds dwipe's ``mono`` entry to the library's palette list.
         self.screens = {
             MAIN_ST: MainScreen(self),
             HELP_ST: HelpScreen(self),
@@ -553,6 +641,10 @@ class DiskWipe:
             exit(1)
 
         self.win = ConsoleWindow(opts=win_opts)
+        # Color is one decision with two parts: which palette and whether to use
+        # it.  Settle both before the first draw so NO_COLOR works as well as
+        # the switches.
+        self._settle_appearance()
         # Initialize screen stack
         self.stack = ScreenStack(self.win, None, SCREEN_NAMES, self.screens)
 
@@ -585,9 +677,8 @@ class DiskWipe:
         spin.add_key('expand', 'e - expand history entry', genre='action', scope=LOG_ST)
         spin.add_key('copy', 'c - copy entry to clipboard', genre='action', scope=LOG_ST)
         spin.add_key('show_keys', 'K - show keys (demo mode)', genre='action')
-        # Load theme from persistent state
-        self.opts.theme = self.persistent_state.state.get('theme', '')
-        Theme.set(self.opts.theme)
+        # The appearance (and therefore opts.theme) was settled when the window
+        # was created, so the picker and the saved preference already agree.
         self.win.set_handled_keys(self.spin.keys)
 
         # Background device change monitor started above
@@ -686,6 +777,28 @@ class DiskWipeScreen(Screen):
     def show_keys_ACTION(self):
         """ Show last key for demo"""
         self.app.win.set_demo_mode(enabled=None) # toggle it
+
+
+class ThemeScreen(Theme.create_picker_screen(DiskWipeScreen, cycle_key='t')):
+    """The library's theme picker plus dwipe's ``mono`` pseudo-theme.
+
+    ``mono`` is a color mode, not a palette, so the picker's swatches follow the
+    shared switch and show the monochrome role hierarchy while it is selected.
+    Overriding ``theme_label`` names that choice in the header instead of naming
+    the palette left installed underneath it.
+    """
+
+    def theme_label(self, theme_name):
+        if not appearance.colors_enabled():
+            return MONO_THEME
+        return super().theme_label(theme_name)
+
+    def spin_theme_ACTION(self):
+        app = self.app
+        current = getattr(app.opts, 'theme', None)
+        index = THEME_CHOICES.index(current) if current in THEME_CHOICES else -1
+        app.apply_theme_choice(THEME_CHOICES[(index + 1) % len(THEME_CHOICES)])
+
 
 class MainScreen(DiskWipeScreen):
     """Main device list screen"""
@@ -1064,14 +1177,15 @@ class MainScreen(DiskWipeScreen):
                 msg = ' ' * 5 + msg
 
                 # Add confirmation message base as DECOR (non-pickable)
-                app.win.add_body(msg, attr=cs.color_pair(Theme.DANGER) | cs.A_BOLD,
+                app.win.add_body(msg,
+                               attr=appearance.semantic_attr(Theme.DANGER) | cs.A_BOLD,
                                context=Context(genre='DECOR'))
 
                 # Add input or hint on same line
                 if app.confirmation.input_buffer:
                     # Show current input with cursor
                     app.win.add_body(app.confirmation.input_buffer + '_',
-                                   attr=cs.color_pair(Theme.DANGER) | cs.A_BOLD,
+                                   attr=appearance.semantic_attr(Theme.DANGER) | cs.A_BOLD,
                                    resume=True)
                 else:
                     # Show hint in dimmed italic
@@ -1402,9 +1516,13 @@ class HelpScreen(DiskWipeScreen):
             f'--slowdown-stop: {opts.slowdown_stop:<{wid}} Stop if disk slows',
             f'--stall-timeout: {opts.stall_timeout:<{wid}} Stall timeout in sec',
             f'--auto-block: .  {"on" if getattr(opts, "auto_block_containers", True) else "off":<{wid}} Auto-block containers',
+            f'--theme: . . . .  {(getattr(opts, "theme", None) or "-"):<{wid}} Color palette (or mono)',
+            f'--no-color: . . . {"on" if getattr(opts, "no_color", False) else "off":<{wid}} Draw without color',
         ]
         for opt in cli_options:
             app.win.add_body(opt, attr=cs.A_DIM)
+        app.win.add_body('Theme "mono" (last in the picker) turns color off; '
+                         'NO_COLOR does the same at startup.', attr=cs.A_DIM)
 
 
 class HistoryScreen(DiskWipeScreen):
@@ -1547,13 +1665,14 @@ class HistoryScreen(DiskWipeScreen):
             # Add deep match indicator if this entry matched only in JSON
             deep_indicator = " *" if timestamp in self.search_matches else ""
 
-            # Choose color based on log level
+            # Choose color based on log level.  Semantic attributes, not pairs:
+            # the same rows must degrade to bold/reverse when color is off.
             if level == 'ERR':
-                level_attr = cs.color_pair(Theme.ERROR) | cs.A_BOLD
+                level_attr = appearance.semantic_attr(Theme.ERROR) | cs.A_BOLD
             elif level in ('WIPE_STOPPED', 'VERIFY_STOPPED'):
-                level_attr = cs.color_pair(Theme.WARNING) | cs.A_BOLD
+                level_attr = appearance.semantic_attr(Theme.WARNING) | cs.A_BOLD
             elif level in ('WIPE_COMPLETE', 'VERIFY_COMPLETE'):
-                level_attr = cs.color_pair(Theme.SUCCESS) | cs.A_BOLD
+                level_attr = appearance.semantic_attr(Theme.SUCCESS) | cs.A_BOLD
             else:
                 level_attr = cs.A_BOLD
 
