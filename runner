@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""
+runner - Development wrapper for dwipe
+Located in the top-level dwipe directory.
+Allows running dwipe from source for debugging with support for command-line arguments.
+
+Usage:
+    ./runner [--mode +V|-V] [--passes 1|2|4] [--verify-pct 1|3|10|30|100] ...
+    ./runner --help     (show all available options)
+"""
+
+import runpy
+import sys
+
+if __name__ == '__main__':
+    # Set program name but preserve all command-line arguments
+    sys.argv[0] = 'dwipe'
+    # Run the dwipe.main module with alter_sys=True to propagate sys.argv
+    runpy.run_module('dwipe.main', run_name='__main__', alter_sys=True)

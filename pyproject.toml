@@ -1,0 +1,35 @@
+[build-system]
+requires = ["flit_core>=3.12,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "dwipe"
+dynamic = ["version"]
+description = "A tool to wipe disks and partitions for Linux"
+authors = [
+    { name = "Joe Defen", email = "joedef@google.com" }
+]
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+keywords = ["disk", "partition", "wipe", "clean", "scrub"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux"
+]
+dependencies = [
+    'console-window ~= 3.1.0',
+]
+
+[project.urls]
+"Homepage" = "https://github.com/joedefen/dwipe"
+"Bug Tracker" = "https://github.com/joedefen/dwipe/issues"
+
+[project.scripts]
+dwipe = "dwipe.main:main"
